@@ -1,135 +1,63 @@
+"""Parsed timer CSV to Perfetto; a verified clock and shared-clock assertion are required."""
 import argparse
 import csv
 import json
 from pathlib import Path
+from parse_timer_csv import is_accumulated, validate_frequency
 
-CYCLE_TO_TIME_BASE = 1000.0
-
-
-def read_csv_rows(csv_path):
-    with open(csv_path, "r", newline="") as f:
-        reader = csv.DictReader(f)
+def read_csv_rows(path):
+    with open(path, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
         return reader.fieldnames or [], list(reader)
 
+def collect_event_names(fields):
+    return [name[:-len("_start_cycle")] for name in fields if name.endswith("_start_cycle")
+            and name[:-len("_start_cycle")] + "_end_cycle" in fields]
 
-def collect_event_names(fieldnames):
+def find_min_start(path):
+    fields, rows = read_csv_rows(path)
+    starts = [int(row[event + "_start_cycle"]) for event in collect_event_names(fields)
+              for row in rows if not is_accumulated(event) and int(row[event + "_start_cycle"]) > 0]
+    return min(starts) if starts else 0
+
+def generate_trace_json(csv_path, rank=0, base_cycle=None, *, cycles_per_us=None, shared_clock=False):
+    validate_frequency(cycles_per_us)
+    if cycles_per_us is None or not shared_clock:
+        raise ValueError("trace requires verified cycles_per_us and shared_clock=True")
+    fields, rows = read_csv_rows(csv_path)
+    origin = find_min_start(csv_path) if base_cycle is None else base_cycle
     events = []
-    fields = set(fieldnames)
-    for col in fieldnames:
-        if not col.endswith("_start_cycle"):
-            continue
-        name = col[: -len("_start_cycle")]
-        if name == "KERNEL_TIMING":
-            continue
-        if not (name.startswith("AIC") or name.startswith("AIV")):
-            continue
-        if f"{name}_end_cycle" in fields:
-            events.append(name)
+    for row in rows:
+        for name in collect_event_names(fields):
+            if is_accumulated(name):
+                continue
+            start, end = int(row[name + "_start_cycle"]), int(row[name + "_end_cycle"])
+            if (start, end) == (0, 0):
+                continue
+            if start <= 0 or end < start or start < origin:
+                raise ValueError(f"invalid trace interval: {name}")
+            event = {"ph": "X", "cat": row["core_type"], "pid": f"capture_{rank}",
+                     "tid": f"group_{row['group_id']}_{row['core_type']}_{row['sub_id']}",
+                     "name": name, "ts": (start-origin) / cycles_per_us, "dur": (end-start) / cycles_per_us,
+                     "args": {"start_cycle": start, "end_cycle": end, "origin_cycle": origin}}
+            if start == end:
+                event.update(ph="i", s="t")
+                event.pop("dur")
+            events.append(event)
     return events
 
-
-def find_min_start(csv_path):
-    """Return the minimum valid start cycle within a single rank's CSV.
-
-    Each rank runs on a separate NPU whose hardware cycle counter has its own
-    absolute origin, so every rank must be zeroed against its own minimum start
-    rather than a shared global base; otherwise ranks with a higher counter
-    origin appear to begin tens of milliseconds into the timeline.
-    """
-    if not csv_path.exists():
-        return 0
-    min_start = None
-    fieldnames, rows = read_csv_rows(csv_path)
-    for event in collect_event_names(fieldnames):
-        start_col = f"{event}_start_cycle"
-        end_col = f"{event}_end_cycle"
-        for row in rows:
-            start = int(row[start_col])
-            end = int(row[end_col])
-            if start > 0 and end > start:
-                min_start = start if min_start is None else min(min_start, start)
-    return min_start if min_start is not None else 0
-
-
-def generate_trace_json(csv_path, rank, base_cycle):
-    fieldnames, rows = read_csv_rows(csv_path)
-    events = collect_event_names(fieldnames)
-    trace_events = []
-
-    for row in rows:
-        group_id = int(row["group_id"])
-        core_type = row["core_type"]
-        sub_id = int(row["sub_id"])
-        tid = f"group_{group_id}_{core_type}_{sub_id}"
-        pid = f"rank{rank}"
-
-        for event in events:
-            start_col = f"{event}_start_cycle"
-            end_col = f"{event}_end_cycle"
-            start = int(row[start_col])
-            end = int(row[end_col])
-            if start <= 0 or end <= start:
-                continue
-
-            ts = (start - base_cycle) / CYCLE_TO_TIME_BASE
-            dur = (end - start) / CYCLE_TO_TIME_BASE
-            trace_events.append({
-                "ph": "X",
-                "cat": "aic_op" if core_type == "AIC" else "aiv_op",
-                "pid": pid,
-                "tid": tid,
-                "name": event,
-                "ts": round(ts, 6),
-                "dur": round(dur, 6),
-                "args": {
-                    "rank": rank,
-                    "group_id": group_id,
-                    "core_type": core_type,
-                    "sub_id": sub_id,
-                    "start_cycle": start,
-                    "end_cycle": end,
-                },
-            })
-
-    return trace_events
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Generate Chrome trace JSON from parsed timer CSV files")
-    parser.add_argument("--timer-dir", default="./timer", help="Directory containing rank_X_npu_time_parsed.csv")
-    parser.add_argument("--output-dir", default="./timer_json", help="Directory for generated trace JSON")
-    parser.add_argument("--rank-start", type=int, default=0, help="Start rank, inclusive")
-    parser.add_argument("--rank-end", type=int, default=1, help="End rank, inclusive")
-    parser.add_argument("--output", default="all_rank_trace.json", help="Merged trace JSON file name")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--csv", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--cycles-per-us", type=float, required=True)
+    parser.add_argument("--shared-clock", action="store_true")
     args = parser.parse_args()
-
-    timer_dir = Path(args.timer_dir)
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    parsed_paths = [
-        timer_dir / f"rank_{rank}_npu_time_parsed.csv"
-        for rank in range(args.rank_start, args.rank_end + 1)
-    ]
-    all_events = []
-
-    for rank, csv_path in zip(range(args.rank_start, args.rank_end + 1), parsed_paths):
-        if not csv_path.exists():
-            print(f"[SKIP] rank_{rank}: 文件不存在 {csv_path}")
-            continue
-        base_cycle = find_min_start(csv_path)
-        rank_events = generate_trace_json(csv_path, rank, base_cycle)
-        all_events.extend(rank_events)
-        rank_output = output_dir / f"rank_{rank}_npu_time.json"
-        with open(rank_output, "w", encoding="utf-8") as f:
-            json.dump(rank_events, f, indent=2, ensure_ascii=False, allow_nan=False)
-        print(f"[INFO] rank_{rank}: {len(rank_events)} events -> {rank_output}")
-
-    merged_output = output_dir / args.output
-    with open(merged_output, "w", encoding="utf-8") as f:
-        json.dump(all_events, f, indent=2, ensure_ascii=False, allow_nan=False)
-    print(f"[INFO] merged: {len(all_events)} events -> {merged_output}")
-
+    events = generate_trace_json(args.csv, cycles_per_us=args.cycles_per_us, shared_clock=args.shared_clock)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    with args.output.open("w", encoding="utf-8") as handle:
+        json.dump(events, handle, ensure_ascii=False, allow_nan=False, indent=2)
+    print(f"Trace: {args.output.resolve()} ({len(events)} events)")
 
 if __name__ == "__main__":
     main()
