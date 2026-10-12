@@ -193,3 +193,61 @@ O 的合法模板覆盖也已核对：`chunk_fwd_o/op_kernel/chunk_fwd_o_tiling_
 | `rg -n` 精确扫描全部 timer 生命周期和 Tik/Tok、结合逐行阅读两 Phase6 与 raw/service 分支 | 五处 Init/Finish 和全部互斥 InitDone、四个 Point、两对 HoWait 均与原图/A 清单匹配；无动态项和额外同步 |
 
 当前最终结论为**源码 Step 9 通过**，第一轮 P2 修复已独立确认；未发现仍需修复的本次源码阻断项。既有 Prepare 合同失败继续如实归档，不能据此声明原有合同全部通过。用户允许的源码交付范围已满足；CANN 编译/安装与实际 Profile 符号、SoC/路由/核映射、GM 边界、ENABLE_TIMER=0、真实 raw/CSV/Perfetto、频率和共同时钟、精度/确定性/内存/打点扰动仍未验证，按 UT README 留待可用设备环境执行。
+
+## 2026-10-12 ATK 输入导出扩展独立审核
+
+本节由未参与输入导出实现的独立子 agent 审核并追加，保留以上原始缺陷、修复和复核历史。
+依据根 `AGENTS.md`、`docs/agents/05-算子测试.md`、通用及本算子 ATK README，
+以及项目 `.agents/skills/op-timer-ascendc/SKILL.md` Step 9；重新读取当前 diff、真实性能 JSON、
+`gdn_reference.py`、`profile_gdn.py`、`timer_flow.md` 和实际 host/kernel/共享计时头。
+本次范围是 executor 的可选快照、离线合同和安装 wheel 后的 A2 操作说明，未修改数学输入规则或计时实现。
+
+### 快照与 DUT 合同逐项核对
+
+下表 executor 路径为 `tests/atk/chunk_gated_delta_rule_fwd/executor_chunk_gated_delta_rule_fwd.py`。
+
+| 项目 | 独立源码证据 | 结论 |
+| --- | --- | --- |
+| q/k/v/g/beta 实际值与 dtype | `build_inputs:85` 调用既有 `effective_inputs`；其 `gdn_reference.py:112`–`:129` 在 CPU 冻结 q/k/v/beta 为 public dtype、g 为 FP32。初始化 `:309` 向快照传 `self._inputs`，`:173`–`:176` 使用 detach/cpu/contiguous，不重新抽样或转换 dtype；NPU DUT 使用同一 inputs 的同 dtype 设备副本 | 同输入合同；不是 JSON seed 重建 |
+| 初态 | 导出 `:179` 和 DUT `:203` 均调用 `deterministic_initial_state(case)`；既有函数由 scenario、sequence_count/Hv/K/V 生成确定性 FP32 初态，DUT 仅移动设备并连续化 | 初态值、shape、dtype 一致 |
+| final_state、scale、chunk_size | 快照 `:176`–`:183` 和 DUT `:234`–`:246` 均来自同一个 GdnCase；profiling `main` 读取保存的 kwargs，未用 CLI 默认值替换 | 保留原调用参数 |
+| layout 与隐式选项 | 保存 `layout="BNSD"`，与原正式 ctypes wrapper `:2942` 默认值相同；exp2、L2Norm、gate/beta 处理等未传选项仍使用同一 wrapper/impl 默认值 | 与原 DUT 行为一致 |
+| cu_seqlens / chunk_indices | 导出和 DUT 均将 offsets 转 list，并调用同一 `canonical_chunk_indices(case.cu_seqlens, case.chunk_size)`；定长两者均为 None | 变长 sequence-major 顺序保持 |
+| 默认关闭、其它角色隔离 | `:161` 仅 DUT 读取 GDN_PROFILE_INPUT_DIR；空变量立即返回。golden、benchmark 初始化提前返回，调用循环不包含 export | 默认无文件；非 DUT 不导出 |
+| 性能循环与原行为 | 独立 AST 比对 HEAD，`build_inputs`、`run_npu`、FunctionApi 的 `__init__`、`__call__`、`export_custom_data` 完全相同。唯一 export 调用在 `init_by_input_data:309` | 导出不进入 `__call__` 性能循环 |
+| 保存首份与路径 | `:165` 校验绝对路径；`:169` 先检查已有文件，`:189` 独占 `xb` 打开并处理 FileExistsError | 已有同名快照不覆盖；README 每轮新 RUN_DIR |
+| --inputs 消费 | `profile_gdn.py:134` weights_only=True/map_location=cpu 读取 tensor 和原生标量/list/None，`:135` 移动五项输入，`:137` 移动初态；capture 使用 kwargs 调用正式与诊断入口 | 格式与已有入口兼容；真实 torch.save/load 仍待目标环境 |
+
+真实 `_perf.json` 仍只有两条，且与 HEAD 文本相同：case 0 为 BF16、B/Hk/Hv/T/K/V=1/16/32/11274/128/128、chunk=64、`cu_seqlens=[0,11274]`、确定性初态与 final_state；case 1 为 BF16、2/32/32/8192/128/128、chunk=64、定长无初态和 final_state。scale 均为 0.08838834764831843。文档明确这些原模型来自 A5，本轮命令在 A2 重放合同，不引用 A5 性能作为 A2 结论。
+
+### 原计时节点与方案 A 重新核对
+
+独立使用 `git ls-files` 列举主算子、Prepare、实际 ChunkFwdH/ChunkFwdO 的 host/kernel 和共享 timer 共 **168 个文件**，逐文件以 `git show HEAD:<path>` 和工作树 UTF-8 文本比较（统一 CRLF/LF）：全部相同。`profile_gdn.py`、parser、trace、CPU reference 和性能 JSON 同样与 HEAD 相同。以下再次读实际代码，不以旧审核结论代替定位证据。
+
+| 原图/方案 A 节点 | 本轮实际位置 | 配对与锚点结论 |
+| --- | --- | --- |
+| Prepare INIT → pack/尾 drain → BODY 收尾 | Prepare raw `:27/:33/:35`，中间 `op.Process` | Init/InitDone/Finish 与图一致；无新增 pack 内事件 |
+| H INIT → chunk 主体 → 收尾 | ChunkFwdH raw `:93/:129`；idle AIC `:54`、有效 AIC `:64`、AIV `:76` InitDone | idle 内层 return 仍回到外层 Finish；每条合法核分支恰一次初始化终点与总收尾 |
+| O INIT → groupTask 主体 → 收尾 | ChunkFwdO raw `:109/:116`；旧服务 `:60`、A5 vector/cube `:59/:67` InitDone | 核型/服务分支保持，内层 return 不漏外层收尾 |
+| arch22 Phase6 前端/H/O | `:479/:497/:632/:637/:677` | 总窗口、初始化、FRONT_DONE、H_DISPATCH_DONE、Finish 与方案 A 对齐 |
+| arch35 Phase6 前端/H/O | `:332/:353/:446/:451/:479` | 同上；两架构均无业务循环新增打点 |
+| 串行 H/O 等待 | arch22 `:640/:644/:647/:649`；arch35 `:454/:458/:461/:463` | 同一串行条件分支包围原 SyncAll；重叠分支不制造 HO_WAIT，原最终同步仍在 Finish 前 |
+| 共享 Tik/Tok | canonical device header `:144` all Tik → `:182` all Tok；`:145` INIT Tik → `:152` Tok；`:153` BODY Tik → `:183` Tok；`:160/:161` Point；`:168/:175` HoWait | 每个起点有对应终点；Point 使用相邻瞬时对；唯一局部 PIPE_ALL 位于总 Tok，BODY 共用末尾时间戳 |
+| 枚举/命名/清单/图 | canonical header 六项、parser `:62` 派生命名、timer_flow 第 3/6 节 | KERNEL_TIMING、MAIN_INIT、MAIN_BODY、PHASE6_FRONT_DONE、PHASE6_H_DISPATCH_DONE、PHASE6_HO_WAIT 的数量/顺序/名称一致；无动态枚举、setDynamicActualIter 或实际 Accumulate |
+
+### 安装后命令与执行证据
+
+主 UT README 已给出 Linux/Bash、仓库根目录、同一已安装 wheel 的 Python/ATK 环境、CANN set_env、ascend910b、设备变量及绝对 RUN_DIR；明确同步仓库 executor。PYTHONPATH 增加本 ATK 算子目录，供 worker 解析 reference/role 模块。使用 find_spec 定位 wheel OPP，在新 Python 进程前注册 ASCEND_CUSTOM_OPP_PATH，并调用实际 `load_ascendc_opapi_libraries` 检查两个 Profile 符号，与 host header `:54/:86` 及实现 `:949/:990` 名称相同；本轮仅核对源码存在，没有实际加载库。
+
+范围前缀清空通用和性能 start/end，统一脚本只执行 performance_device 的完整两条 JSON，不启动 CPU/六 ACLNN benchmark；可选 case 0 使用 start=0/end=1。脚本使用该性能 JSON 和 DUT executor，将 ATK 输出置于 `$RUN_DIR/atk/perf`，快照及两 case 的独立 `--inputs` 采集路径完全一致。raw/CSV/layout/capture metadata/日志的实际文件名与采集代码一致；默认 cycles，只有核实时钟频率和 AIC/AIV 共同时钟后才请求 Perfetto，明确 kernel 各自 origin 和瞬时边界含义。源码归档没有 .git 时，提交号记录使用 if/else，不阻断设备命令。
+
+| 本轮独立执行的命令/检查 | 实际输出 |
+| --- | --- |
+| `python -X utf8 -m unittest discover -s ci/tests -p test_gdn_profile_input_export.py -v` | exit 0；Ran 5 tests in 0.047s；OK |
+| `python -X utf8 -m unittest discover -s ci/tests -p test_gdn_forward_output_contract.py -v` | exit 0；Ran 2 tests in 0.032s；OK |
+| `python -X utf8 -m unittest discover -s fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut -p test_timer_contract.py -v` | exit 0；Ran 20 tests in 0.137s；OK |
+| 独立 `python -X utf8 -` AST、compile、HEAD 文本及 Markdown 链接检查 | build_inputs/run_npu/三个 FunctionApi 方法 AST 相同；新增测试与 executor compile() 通过；168 个 host/kernel/timer 文件及采集/parser/reference/perf JSON 不变；两个 README 的 4 个相对 Markdown 链接目标存在，ATK→UT 标题锚点匹配 |
+| 提取主 UT README 的 Bash 代码块，逐项通过 Git Bash `--noprofile --norc -n`；随后单独重验最新提交号 if/else 块 | 10 个块通过；最新第 3 块也通过。首次沙箱检查被 Git Bash signal pipe 权限阻止，获授权只读检查后通过；`-n` 没有执行任何设备/安装命令 |
+| `git diff --check` | exit 0，无输出。强制关闭 autocrlf 的额外尝试会将本 Windows 工作树 CRLF 误报为尾空白，未将该尝试当作实现缺陷 |
+
+本次扩展的**源码独立审核通过**，未发现需要修复的新增阻断项。以上 27 项是无 torch/ATK/CANN/NPU 的离线合同，不能证明真实张量序列化、设备 worker 环境继承、wheel/OPP 安装及 Profile 符号加载、两 case 实际运行、kernel 路由/核映射、GM 边界、数值验收、真实 raw/CSV/Perfetto、时钟或观察扰动通过。原审核中的既有 Prepare 合同失败和设备待验事项继续保留；用户本轮只授权源码且生产设备不可接入，本轮没有设备验收或性能结论。

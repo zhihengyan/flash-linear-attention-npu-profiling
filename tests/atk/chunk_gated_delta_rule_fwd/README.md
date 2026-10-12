@@ -127,3 +127,15 @@ GDN 完整前向增加独立 profiling ACLNN/ctypes 入口，原正式 ABI、Sta
 当前 `aclnn_abi_contract.py` 的既有失败
 `prepare kernel 缺少非 exp2 模式的局部指数换底选择` 在本次源码修改前后均存在；
 本次仅使其调用匹配兼容追加的内部 optional timer 参数。
+
+## 工程性能用例的逐核计时输入导出（2026-10-12）
+
+可在 ATK 启动前设置绝对路径 `GDN_PROFILE_INPUT_DIR`。DUT 初始化时保存每个 case 的首份
+有效输入和原调用参数为 `case_<id>.pt`；已有同名文件不覆盖。未设置开关时不导出，
+benchmark/golden 和正式调用循环不导出。JSON、生成器、DUT 数学计算和精度规则沿用原资产。
+
+性能入口仍执行 `atk_chunk_gated_delta_rule_fwd_perf.json` 的 case 0/1，再使用 profiling UT 的
+`--inputs` 在独立进程采集同输入的逐核 Tik/Tok。安装 wheel 后的 A2 环境准备、性能命令、
+CSV/Perfetto 导出、结果路径和排查方法已写入
+[profiling UT 说明](../../../fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut/README.md#安装-wheel-后使用工程性能用例采集a2)。
+本机只执行离线合同验证，ATK/CANN/NPU 实测待目标环境执行。

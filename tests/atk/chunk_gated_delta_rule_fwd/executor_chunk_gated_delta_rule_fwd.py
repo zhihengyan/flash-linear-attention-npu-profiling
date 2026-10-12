@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -153,6 +155,45 @@ def run_cpu(inputs, case: GdnCase, public_dtype):
     return run_golden_reference(*inputs, case, public_dtype)
 
 
+def export_profile_inputs(inputs, case: GdnCase, case_id: int, role: str):
+    """Save the first DUT initialization for later profiling outside ATK timing loops."""
+
+    dump_root = os.getenv("GDN_PROFILE_INPUT_DIR") if role == "dut" else None
+    if not dump_root:
+        return None
+    directory = Path(dump_root)
+    if not directory.is_absolute():
+        raise ValueError("GDN_PROFILE_INPUT_DIR 必须是绝对路径，避免 ATK worker 工作目录歧义")
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / f"case_{int(case_id)}.pt"
+    if destination.exists():
+        return None
+    saved = {
+        name: tensor.detach().cpu().contiguous()
+        for name, tensor in zip(("q", "k", "v", "g", "beta"), inputs)
+    }
+    saved["kwargs"] = {
+        "layout": "BNSD",
+        "scale": case.scale,
+        "chunk_size": case.chunk_size,
+        "initial_state": deterministic_initial_state(case),
+        "output_final_state": case.output_final_state,
+        "cu_seqlens": None if case.cu_seqlens is None else list(case.cu_seqlens),
+        "chunk_indices": canonical_chunk_indices(case.cu_seqlens, case.chunk_size),
+    }
+    saved["case_id"] = int(case_id)
+    saved["scenario"] = case.scenario
+    saved["profile_input_version"] = 1
+    try:
+        # Keep the first snapshot if ATK creates more than one DUT instance.
+        with destination.open("xb") as stream:
+            torch.save(saved, stream)
+    except FileExistsError:
+        return None
+    print(f"[gdn-profile-input] case={case_id} path={destination}", flush=True)
+    return destination
+
+
 def run_npu(role: str, inputs, case: GdnCase):
     """运行融合 DUT 或真实六 ACLNN NPU benchmark。"""
 
@@ -265,6 +306,7 @@ class FunctionApi(BaseApi):
                 flush=True,
             )
             return
+        export_profile_inputs(self._inputs, self._case, self._case_id, self._role)
         print(
             f"[gdn-double-atk] case={self._case_id} "
             "role=dut target=chunk_gated_delta_rule_fwd "
