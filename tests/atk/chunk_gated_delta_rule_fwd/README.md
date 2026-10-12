@@ -113,3 +113,17 @@ python torch_custom/fla_npu/test/test_aclnn_ctypes_abi.py NormOutputsTest --npu
 
 以上是接口回归，不是 ATK 全量精度、梯度精度、确定性、内存或性能验收。
 本轮未执行这些正式验收项目，不能据此宣称完整 ATK 验收通过。
+
+## 方案 A 源码计时接入（2026-10-11）
+
+GDN 完整前向增加独立 profiling ACLNN/ctypes 入口，原正式 ABI、Stable schema 和十项返回顺序保留。
+覆盖实际 Prepare→ChunkFwdH→ChunkFwdO 与 arch22/arch35 Phase6，记录逐核总窗口、初始化/主体和融合 H/O 边界。
+采集、时钟条件及待设备验证项见
+[profiling UT 说明](../../../fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut/README.md)。
+
+本次范围由用户限定为源码：计时离线合同 20 项、前向消费合同 2 项通过，
+含 mock 的旧输出契约、诊断参数顺序、原始缓冲校验与 synthetic 导出测试。
+未进行 CANN 编译、NPU 采集、精度、确定性、内存或性能验收。
+当前 `aclnn_abi_contract.py` 的既有失败
+`prepare kernel 缺少非 exp2 模式的局部指数换底选择` 在本次源码修改前后均存在；
+本次仅使其调用匹配兼容追加的内部 optional timer 参数。

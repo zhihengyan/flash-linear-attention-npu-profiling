@@ -2,6 +2,7 @@
  * Copyright (c) 2026 Tianjin University, Ltd.
  * CANN Open Software License Agreement Version 2.0.
  */
+#include "kernel_utils/gdn_timer/AscendTimerV2_device.hpp"
 #include "chunk_gated_delta_rule_fwd_arch35_struct.h"
 #include "ho_pipeline_context.h"
 #include <type_traits>
@@ -325,8 +326,10 @@ template <typename InputT, typename TileShapes,
 __aicore__ inline void RunPhase6(
     GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR beta, GM_ADDR rawG, GM_ADDR gk,
     GM_ADDR initialState, GM_ADDR cuSeqlens, GM_ADDR chunkIndices, GM_ADDR o,
-    GM_ADDR finalState, GM_ADDR gCumsumBth, GM_ADDR A, GM_ADDR workspace, GM_ADDR tiling)
+    GM_ADDR finalState, GM_ADDR gCumsumBth, GM_ADDR A, GM_ADDR workspace, GM_ADDR tiling, GM_ADDR timerAddr)
 {
+    GdnKernelTimer timer;
+    TIMER_BLOCK(timer.Init(timerAddr, AscendTimer::PHASE6));
     GM_ADDR userWorkspace = AscendC::GetUserWorkspace(workspace);
     const __gm__ ChunkGatedDeltaRuleStateOutputTrailer *stateOutputTiling = GetStateOutputTrailer(tiling);
     const __gm__ Arch35ChunkGatedDeltaRuleFwdTrailer *phase6 = GetPhase6Trailer(tiling);
@@ -347,6 +350,7 @@ __aicore__ inline void RunPhase6(
     GM_ADDR solveWorkspace =
         solveWorkspaceBase + coreGroup * coefficient.solveWorkspacePerCoreBytes;
 
+    TIMER_BLOCK(timer.InitDone());
     if ASCEND_IS_AIC {
         NsChunkKktCube::ChunkKktCube<InputT> kktCube;
         kktCube.Process(k, cuSeqlens, chunkIndices, scoreWorkspace, &coefficient);
@@ -439,11 +443,15 @@ __aicore__ inline void RunPhase6(
     if (phase6->writeGCumsum != 0) {
         WritePublicCumsumRows(gCumsumBht, gCumsumBth, cuSeqlens, chunkIndices, coefficient);
     }
+    TIMER_BLOCK(timer.Point(AscendTimer::PHASE6_FRONT_DONE));
     DispatchFwdH<InputT, TileShapes, Variant, StateT>(k, w, u, gCumsumBht, gk, initialState, cuSeqlens,
                                       chunkIndices, h, vNew, finalState, tiling, userWorkspace,
                                       hoPipelineContext);
 
+    TIMER_BLOCK(timer.Point(AscendTimer::PHASE6_H_DISPATCH_DONE));
+
     if (!hoPipelineContext.enabled) {
+        TIMER_BLOCK(timer.HoWaitBegin());
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
         // H publishes h/vNew through MTE3 and O first consumes them through MTE2.
         // Limit the global hand-off to those pipelines instead of draining PIPE_ALL.
@@ -452,6 +460,7 @@ __aicore__ inline void RunPhase6(
         // Ascend910B supports only the full-pipeline SyncAll overload.
         AscendC::SyncAll<false>();
 #endif
+        TIMER_BLOCK(timer.HoWaitEnd());
     }
 
     const uint64_t oTilingOffset =
@@ -467,6 +476,7 @@ __aicore__ inline void RunPhase6(
         // full physical-group phase boundary before returning.
         AscendC::SyncAll<false>();
     }
+    TIMER_BLOCK(timer.Finish());
 }
 
 } // namespace
@@ -474,7 +484,7 @@ __aicore__ inline void RunPhase6(
 
 extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd(
     GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR beta, GM_ADDR a_storage, GM_ADDR raw_g,
-    GM_ADDR gk, GM_ADDR initial_state, GM_ADDR cu_seqlens, GM_ADDR chunk_indices,
+    GM_ADDR gk, GM_ADDR initial_state, GM_ADDR cu_seqlens, GM_ADDR chunk_indices, GM_ADDR timerAddr,
     GM_ADDR o, GM_ADDR final_state, GM_ADDR g_cumsum_bth, GM_ADDR A,
     GM_ADDR workspace, GM_ADDR tiling)
 {
@@ -484,12 +494,12 @@ extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd(
         KERNEL_TASK_TYPE(1, KERNEL_TYPE_MIX_AIC_1_2);
         GDN::RunPhase6<DTYPE_Q, Catlass::Gemm::Kernel::GDNFwdHTileShapes128>(
             q, k, v, beta, raw_g, gk, initial_state, cu_seqlens, chunk_indices,
-            o, final_state, g_cumsum_bth, A, workspace, tiling);
+            o, final_state, g_cumsum_bth, A, workspace, tiling, timerAddr);
     } else if (TILING_KEY_IS(2)) {
         KERNEL_TASK_TYPE(2, KERNEL_TYPE_MIX_AIC_1_2);
         GDN::RunPhase6<DTYPE_Q, Catlass::Gemm::Kernel::GDNFwdHTileShapes256>(
             q, k, v, beta, raw_g, gk, initial_state, cu_seqlens, chunk_indices,
-            o, final_state, g_cumsum_bth, A, workspace, tiling);
+            o, final_state, g_cumsum_bth, A, workspace, tiling, timerAddr);
 #if defined(ORIG_DTYPE_Q) && (ORIG_DTYPE_Q == DT_BF16) && \
     defined(ORIG_DTYPE_INITIAL_STATE) && \
     ((ORIG_DTYPE_INITIAL_STATE == DT_FLOAT) || (ORIG_DTYPE_INITIAL_STATE == DT_BF16))
@@ -498,7 +508,7 @@ extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd(
         GDN::RunPhase6<DTYPE_Q, Catlass::Gemm::Kernel::GDNFwdHTileShapes128,
                       GDN::Arch35GdnSyncVariant::B30, DTYPE_INITIAL_STATE>(
             q, k, v, beta, raw_g, gk, initial_state, cu_seqlens, chunk_indices,
-            o, final_state, g_cumsum_bth, A, workspace, tiling);
+            o, final_state, g_cumsum_bth, A, workspace, tiling, timerAddr);
 #endif
     }
 }

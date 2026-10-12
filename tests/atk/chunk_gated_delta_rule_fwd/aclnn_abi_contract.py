@@ -155,7 +155,7 @@ def main() -> None:
         "prepare path A5 guard": r"if\s*\(UsePreparePath\(params\)\)\s*\{\s*"
         r"CHECK_COND\(IsAscend950\(\),\s*ACLNN_ERR_PARAM_INVALID",
         "direct BSND output": r"ChunkFwdO\(.*?params\.useExp2,\s*params\.stateVFirst,\s*"
-        r'"BSND",\s*params\.oOut,\s*executorPtr\)',
+        r'"BSND",\s*params\.oOut,\s*executorPtr(?:,\s*timerOptional)?\)',
         "gCumsum scratch": r"gCumsumCompute\s*=\s*executorPtr->AllocTensor",
         "A scratch": r"aCompute\s*=\s*executorPtr->AllocTensor",
     }

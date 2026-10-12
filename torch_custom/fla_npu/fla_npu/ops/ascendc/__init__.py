@@ -95,6 +95,8 @@ BACKWARD_OPS = {
 # ctypes 直接写 tensor storage 时，PyTorch 无法从 Python 调用自动发现副作用。
 # 这里集中声明被修改的参数，由 direct-op wrapper 负责 grad 限制和版本计数。
 MUTATED_ARGUMENTS = {
+    # Private eager diagnostic helper maintains its own successful-launch bump.
+    "_profile_chunk_gated_delta_rule_fwd": ("timer",),
     "causal_conv1d": ("conv_states",),
     "causal_conv1d_fn": ("conv_states",),
     "causal_conv1d_update": ("conv_state",),

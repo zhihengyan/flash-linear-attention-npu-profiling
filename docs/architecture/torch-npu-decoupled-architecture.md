@@ -324,6 +324,13 @@ wrapper 必须明确选择以下一种语义：
 
 当前 `causal_conv1d` 的 `conv_states` 以及 `recurrent_gated_delta_rule` 的 `state` 都会被原地修改。适配层的 schema 已经把对应参数标成 `Tensor(a!)`，公共入口另外用 `MUTATED_ARGUMENTS` 登记这些参数，拒绝状态 tensor 设置 `requires_grad=True`，并在 launch 成功后推进 version counter。这补齐了 eager autograd 的版本检查；schema 对 dispatcher 可见，但还没有 FakeTensor / functionalization 实现，所以还不能作为 compiler-visible op 直接入图。
 
+GDN 的私有 `_aclnn_ctypes._profile_chunk_gated_delta_rule_fwd` 使用独立诊断 ACLNN 入口，
+原位写入 INT64 `timer`，在 `MUTATED_ARGUMENTS` 中登记该参数。该 helper 不经过公共 facade，
+因此自身拒绝 timer 求梯度，并在 launch 成功后显式推进 timer 的 version counter；
+参数校验或 launch 异常时不推进。INT64 即使不求梯度，也可能是 autograd 保存的非梯度输入，
+不能省略版本维护。诊断 helper 仅支持 eager 独立采集，没有新 Stable schema、FakeTensor 或
+opcheck，未声明支持 graph capture、torch.compile 或 torch.export；正式 GDN 返回契约保持原样。
+
 `ctx.mark_dirty()` 只服务正确实现的 `torch.autograd.Function`，不能替代 mutation schema，也不能让 `torch.compile` 看见绕过 dispatcher 的写入。
 
 ### 5.2 多卡 device 处理

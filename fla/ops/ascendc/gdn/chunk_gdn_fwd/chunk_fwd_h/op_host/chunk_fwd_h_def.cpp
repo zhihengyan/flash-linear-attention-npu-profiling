@@ -73,6 +73,10 @@ public:
             .DataType(indexTypes).Format(formats).UnknownShapeFormat(formats)
             .AutoContiguous();
 
+        // In-place diagnostic buffer; never materialize a contiguous copy.
+        this->Input("timer").ParamType(OPTIONAL).DataType(indexTypes).Format(formats)
+            .UnknownShapeFormat(formats);
+
         this->Output("h")
             .ParamType(REQUIRED)
             .DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
