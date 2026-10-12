@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import ctypes
+import builtins
 import importlib.util
 import json
+import os
 import re
 import sys
 import types
@@ -190,6 +192,58 @@ def load_adapter():
 
 
 class TimerCaptureEvidenceTest(unittest.TestCase):
+    def test_replay_registers_installed_opp_before_torch_npu_import(self):
+        with test_directory() as directory:
+            vendor = directory / "opp/vendors/fla_npu_transformer"
+            vendor.mkdir(parents=True)
+            imported = []
+
+            class Tensor:
+                def to(self, device):
+                    return self
+
+                def contiguous(self):
+                    return self
+
+            saved = {name: Tensor() for name in ("q", "k", "v", "g", "beta")}
+            torch = types.SimpleNamespace(Tensor=Tensor, device=str, load=lambda *args, **kwargs: saved)
+            original_import = builtins.__import__
+
+            def importing(name, *args, **kwargs):
+                if name in ("torch", "torch_npu"):
+                    imported.append(name)
+                    self.assertEqual(os.environ["ASCEND_CUSTOM_OPP_PATH"].split(os.pathsep)[:2],
+                                     [str(vendor), str(vendor / "op_api/lib")])
+                    return torch if name == "torch" else types.ModuleType("torch_npu")
+                return original_import(name, *args, **kwargs)
+
+            with mock.patch.object(capture_tool, "find_spec", return_value=types.SimpleNamespace(origin=str(directory / "__init__.py"))), \
+                 mock.patch.object(capture_tool, "capture") as capture, \
+                 mock.patch.dict(os.environ, {"ASCEND_CUSTOM_OPP_PATH": "old-opp"}), \
+                 mock.patch.object(sys, "argv", ["profile_gdn.py", "--inputs", "saved_case.pt"]), \
+                 mock.patch.object(builtins, "__import__", side_effect=importing):
+                capture_tool.main()
+                self.assertEqual(imported, ["torch", "torch_npu"])
+                self.assertTrue(os.environ["ASCEND_CUSTOM_OPP_PATH"].endswith(os.pathsep + "old-opp"))
+                capture.assert_called_once()
+
+    def test_replay_with_missing_package_opp_stops_before_backend_initialization(self):
+        original_import = builtins.__import__
+
+        def importing(name, *args, **kwargs):
+            if name in ("torch", "torch_npu"):
+                raise AssertionError("backend import must not occur")
+            return original_import(name, *args, **kwargs)
+
+        with test_directory() as directory:
+            for package in (None, types.SimpleNamespace(origin=None), types.SimpleNamespace(origin=str(directory / "__init__.py"))):
+                with self.subTest(package=package), \
+                     mock.patch.object(capture_tool, "find_spec", return_value=package), \
+                     mock.patch.object(sys, "argv", ["profile_gdn.py", "--inputs", "saved_case.pt"]), \
+                     mock.patch.object(builtins, "__import__", side_effect=importing), \
+                     self.assertRaises(RuntimeError):
+                    capture_tool.main()
+
     def capture_synthetic(self, raw, directory, *, mismatch=False, address=64):
         device = types.SimpleNamespace(type="npu")
         inputs = [types.SimpleNamespace(device=device, shape=(1, 1, 1, 128), dtype="synthetic") for _ in range(5)]

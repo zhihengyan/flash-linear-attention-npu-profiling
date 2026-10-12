@@ -443,3 +443,49 @@ UT/ATK README 的当前新增段落、api/design/timer_flow 与上述实现及�
 45 项均为离线/模拟证据；用户旧 H/O 完整记录是修复前反馈。
 修复后的真实 Prepare/H/O 完整采集、新 wheel/OPP 实际加载、GM 边界、正式精度/确定性/内存/性能、
 时钟与打点扰动仍待生产环境复测；本轮源码审核通过不代表阶段 05 正式验收完成。
+
+## 2026-10-12 独立重放 CLI 的 OPP 初始化顺序复核
+
+本轮仍由未参与实现的 Step 9 独立子 agent 执行，只追加报告，不修改实现。
+缓存发布修复已固定在提交 `3e06e104d03d9a0a24735c71f47ad369417e15b7`。
+独立查看当前四文件 diff、真实包初始化及 pth 代码后，重新运行新增后的 28 项 timer 合同和 CLI help。
+**结论：本轮源码复核通过，未发现新增阻断问题；硬件完整采集仍未复测。**
+上轮 45 项证据和全部历史保持，以下是补充复核，不覆盖此前结果。
+
+### 初始化缺口与修复范围
+
+`torch_custom/fla_npu/fla_npu/__init__.py:101`–`:119` 明确说明 CANN 可能在 import torch_npu 时
+初始化 host/tiling/kernel 注册表，随后 import fla_npu 再设 ASCEND_CUSTOM_OPP_PATH 可能已过晚。
+同包 `fla_npu_opp_env.py` 通过 pth 提前设置路径，但允许禁用，且 vendor 不存在时会跳过。
+原 CLI 在重放输入时先 import torch/torch_npu 并执行 inputs.to(NPU)，直到 capture 才 import fla_npu；
+先前性能入口只修改自己的子进程环境，不能使之后在父 shell 启动的独立重放进程继承那些修改。
+因此 CLI 需要在 backend 初始化前自行准备当前 Python 可发现包的 OPP 路径。
+
+`profile_gdn.py:20` 的 prepare_capture_environment 使用顶层 find_spec("fla_npu") 查找 spec，
+根据 spec.origin 定位包内 `opp/vendors/fla_npu_transformer`，只检查目录和修改环境变量。
+`:26`–`:31` 将该 vendor 和 op_api/lib 置于现有路径前方，其它非空 OPP 路径保留原顺序。
+`:24/:27` 在缺包、origin 或 vendor 时抛错；实际 main 的调用在 `:154`，早于 torch/torch_npu 导入、
+输入加载与 NPU 转移。help 由 argparse 直接结束；parse-only 在调用准备函数前导出并返回。
+
+该函数没有 import fla_npu、torch 或 torch_npu，没有 ctypes/CDLL、NPU 方法或 CANN 调用。
+包源码、共享 timer、parser、capture 数值比较、raw 保留和完整性检查未因本轮初始化修复变化。
+它只保证独立 CLI 的准备顺序；不宣称可以重新初始化已经启动的 CANN 注册表，或保证任何目标 wheel/OPP 已通过加载验收。
+
+### 独立执行证据
+
+| 命令/独立检查 | 实际结果 |
+| --- | --- |
+| `python -X utf8 -m unittest discover -s fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut -p test_timer_contract.py -v` | exit 0；Ran 28 tests in 0.332s；OK。新增两项执行真实 main 的 mock，验证路径在 torch/torch_npu import 前就绪，以及缺 spec/origin/vendor 时无 backend import |
+| `python -X utf8 fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut/profile_gdn.py --help` | exit 0，参数保持，无 wheel/NPU 前置要求 |
+| 独立调用 actual main 的 help/parse-only 分支 | 将 prepare_capture_environment 替换为一调用即失败的函数；help 正常 exit 0，parse-only 恰调用 export 一次，两者均未进入环境准备 |
+| 真实 find_spec 的合成包实验 | 临时包的 __init__.py 设为一执行即抛错，vendor 目录存在；真实 prepare_capture_environment 成功，fla_npu 未进入 sys.modules，说明源文件未执行。重复 vendor/op_api 路径排到前两项，其它两个 OPP 路径顺序保留；临时目录已清理。这是 synthetic 文件系统证据，不是已安装 wheel/NPU 验收 |
+| 两个修改后 Python 文件 compile() | profile_gdn/test_timer_contract 语法通过 |
+| 与提交 3e06e104 的独立字节比较 | 两个共享 timer 头和原 timer_review 全文在追加本节前完全相同（统一 CRLF/LF）；原 45 项和旧 ABI 失败记录未改写 |
+| 当前 git diff、UT/ATK README 对照 | 仅 CLI 环境准备/调用时机、两项测试、README 计数及初始化前提；没有新增 kernel、数学、flags、SyncAll、计时槽位或 CANN 调用 |
+| `git diff --check` | exit 0，无空白错误，仅已有 LF/CRLF 提示 |
+
+当前计数为 28 项 timer 加上上轮 12 项入口、5 项快照、2 项输出，合计 47 项离线/模拟合同。
+后三组及对应入口/快照/输出实现本轮未修改，复用上轮实际通过证据，本轮没有重复运行这 19 项。
+既有 `prepare kernel 缺少非 exp2 模式的局部指数换底选择` 未修复，上一轮失败结论继续有效。
+没有执行真实 wheel 安装、torch.save/load、CANN 注册表初始化、编译、NPU 采集或正式 ATK 验收；
+初始化顺序与缓存发布两个源码修复的目标设备效果均仍待复测。

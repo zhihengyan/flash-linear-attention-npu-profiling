@@ -8,12 +8,27 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+from importlib.util import find_spec
 import json
 import os
 from pathlib import Path
 
 from parse_timer_csv import HEADER_PATH, LAYOUT, TOTAL_BUFFER_SIZE, parse_and_dump, print_summary, summarize_raw, validate_frequency
 from trace_parser import generate_trace_json
+
+
+def prepare_capture_environment():
+    """Register the current wheel before torch_npu initializes the kernel registry."""
+    spec = find_spec("fla_npu")
+    if spec is None or spec.origin is None:
+        raise RuntimeError("Current Python has no installed fla_npu; install the complete A5 wheel first")
+    vendor = Path(spec.origin).resolve().parent / "opp/vendors/fla_npu_transformer"
+    if not vendor.is_dir():
+        raise RuntimeError(f"Installed wheel has no OPP vendor directory: {vendor}")
+    paths = [str(vendor), str(vendor / "op_api/lib")]
+    paths.extend(part for part in os.environ.get("ASCEND_CUSTOM_OPP_PATH", "").split(os.pathsep)
+                 if part and part not in paths)
+    os.environ["ASCEND_CUSTOM_OPP_PATH"] = os.pathsep.join(paths)
 
 
 def export(raw_path, output_dir, cycles_per_us=None, shared_clock=False):
@@ -136,6 +151,7 @@ def main():
     if args.parse_only is not None:
         export(args.parse_only, args.output_dir, args.cycles_per_us, args.shared_clock)
         return
+    prepare_capture_environment()
     import torch
     import torch_npu  # Registers torch.npu.
 

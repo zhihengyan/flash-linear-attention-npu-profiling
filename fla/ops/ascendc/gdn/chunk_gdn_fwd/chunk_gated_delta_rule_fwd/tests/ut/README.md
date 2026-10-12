@@ -162,6 +162,7 @@ done
 
 这包含 kernel 修改，必须同步源码后**重新编包安装**，仅更新 Python 不足以修复。
 按第 2 节重建安装 A5 wheel 后，可以复用已保存的 case_0.pt，只重跑诊断，无需再执行 ATK 性能用例：
+该独立 CLI 会在导入 torch_npu 前注册当前 Python 已安装 wheel 的 OPP，避免旧注册表影响重试。
 
 ```bash
 # 仓库根目录；RUN_DIR 改为之前入口打印的那一轮目录。
@@ -186,7 +187,7 @@ python "$UT/profile_gdn.py" --inputs "$RUN_DIR/inputs/case_0.pt" \
 | raw 无事件、缺核或坏布局 | 保留 raw/metadata/日志，核查新 kernel、ENABLE_TIMER 和实际路由 |
 | 十项 exact 对比失败 | raw 会保留；按输出有效区定位差异，不直接放宽阈值形成通过结论 |
 
-一键入口的环境和调度通过 12 项模拟合同，既有输入导出 5 项、输出合同 2 项、timer 合同 26 项通过。
+一键入口的环境和调度通过 12 项模拟合同，既有输入导出 5 项、输出合同 2 项、timer 合同 28 项通过。
 这些不代表 Docker、真实 torch.save/load、CANN 编译、两条 A5 case 实测、精度、内存、时钟或扰动验收通过。
 既有 ABI 合同失败 `prepare kernel 缺少非 exp2 模式的局部指数换底选择` 继续保留，未在本轮修复。
 源码审核证据见[独立审核](../../docs/timer_review.md)，阶段和枚举见[打点流程](../../docs/timer_flow.md)，
