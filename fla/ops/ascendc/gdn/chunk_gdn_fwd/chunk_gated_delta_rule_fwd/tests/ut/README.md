@@ -49,6 +49,10 @@ python -m pip install --force-reinstall --no-cache-dir --no-deps 'dist/<本轮�
 `python -m pip uninstall -y flash-linear-attention-npu-a2`。两个档位共用 fla_npu 文件，避免同时保留。
 构建细节见[开发者指南](../../../../../../../../docs/开发者指南.md)。镜像已含依赖，本流程不重复安装它们。
 
+更新后的编包脚本只接收本轮独立输出目录的 wheel，并先校验其 OPP 与本轮 staging 一致。
+看到 `Verified all ... staged OPP files in this wheel` 后，复制随后的完整安装命令。
+不同文件名的旧 wheel 保留；同名 wheel 会被本轮校验后的产物覆盖。
+
 ## 3. 安装后只运行这一个脚本
 
 ```bash
@@ -153,6 +157,26 @@ done
 `--shared-clock` 是调用方对平台事实的确认，脚本不猜测频率或自动校准时钟。
 
 ## 排查与验证边界
+
+### host/Python 一致，但 kernel MD5 不一致
+
+2026-10-12 的一次反馈中，已安装 Prepare kernel 与选中 wheel 内的 MD5 都是 `48919...`，
+本轮 build/lib 则为 `2255...`；选中的是 `main.devf9ba043` 的早期 wheel。
+旧 `build_wheel.py` 按文件名排序选择 dist 中最后一个文件，提交号的字典顺序并非构建时间顺序，
+因而可能把旧 wheel 打印为本轮安装目标。host/Python 不变时，安装旧 wheel 仍可能通过这两项检查。
+
+本轮已改为独立目录接收新 wheel、对照本轮 staging 校验全部 OPP 后再发布，不跳过 kernel 检查。
+同步源码后按第 2 节重新编包安装，再执行入口；无需删除旧 dist 文件或手工复制单个 .o。
+安装后先独立检查：
+
+```bash
+python scripts/verify_libcust_opapi_md5.py --python
+```
+
+预期 host、全部 kernel 和 Python 检查均为 OK，再执行第 3 节采集。
+若仍不一致，比较同一 kernel 的 wheel 内、site-packages 和 build/lib 三方 MD5：
+wheel=installed≠build 指向所选归档/staging 不一致；wheel=build≠installed 指向安装覆盖/当前环境问题。
+文件差异本身不证明年龄；保留实际 wheel 文件名和日志，不用 `--no-kernel` 绕过预检。
 
 ### Prepare 全零 / incomplete Prepare/H/O capture
 

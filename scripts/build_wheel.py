@@ -21,6 +21,7 @@ import threading
 import time
 import zipfile
 from pathlib import Path
+from uuid import uuid4
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +58,7 @@ _COMPILE_STAGE_INNER_CAP = 0.9
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from fla_npu_artifacts import get_wheel_dist_name  # noqa: E402
+from check_install_workflows import _manifest_from_directory, _manifest_from_wheel  # noqa: E402
 
 
 def _read_new_lines(path: Path, offset: int) -> "tuple[list[str], int]":
@@ -414,6 +416,32 @@ def _install_command(wheel_path: Path) -> str:
     )
 
 
+def _publish_built_wheel(current_dir: Path, wheel_dir: Path) -> Path:
+    """Verify and publish the sole wheel emitted by this invocation."""
+    wheels = list(current_dir.glob("*.whl"))
+    if len(wheels) != 1 or not wheels[0].name.startswith(get_wheel_dist_name() + "-"):
+        raise RuntimeError(f"Expected exactly one current-build wheel under {current_dir}, found {[p.name for p in wheels]}")
+    wheel = wheels[0]
+    staged = [path for path in (REPO_ROOT / "build").glob("lib*/fla_npu") if (path / "opp").is_dir()]
+    if len(staged) != 1:
+        raise RuntimeError(f"Cannot identify this build's staged OPP; expected one package, found {staged}")
+    expected = _manifest_from_directory(staged[0])
+    actual = _manifest_from_wheel(wheel)
+    if not expected or actual != expected:
+        missing = sorted(expected.keys() - actual.keys())
+        extra = sorted(actual.keys() - expected.keys())
+        changed = sorted(name for name in expected.keys() & actual.keys() if expected[name] != actual[name])
+        raise RuntimeError(f"Current wheel OPP differs from staged build; refusing installation command: "
+                           f"missing={missing}, extra={extra}, changed={changed}. Wheel retained at {wheel}")
+    _inject_runtime_pins(wheel)
+    wheel_dir.mkdir(parents=True, exist_ok=True)
+    destination = wheel_dir / wheel.name
+    wheel.replace(destination)
+    current_dir.rmdir()  # Only the now-empty per-run directory; no recursive cleanup.
+    print(f"[fla-npu build] Verified all {len(expected)} staged OPP files in this wheel", flush=True)
+    return destination
+
+
 def _prepare_abi_free_launcher() -> None:
     """Stage the ABI-free launcher the wheel will carry.
 
@@ -654,7 +682,16 @@ def main() -> int:
         f"{os.getenv('FLA_NPU_SOC', '<default>')}, wheel 目录 {wheel_dir}）"
     )
     _prepare_abi_free_launcher()
-    build_log = wheel_dir / _BUILD_LOG_NAME
+    # build.sh recreates these intermediate roots. Keep pip output/logs alive
+    # until verification, even when the requested destination is under one.
+    cleaned_roots = [REPO_ROOT / name for name in ("build", "build_out", "output")]
+    work_dir = REPO_ROOT / "dist" if any(wheel_dir.is_relative_to(path.resolve()) for path in cleaned_roots) else wheel_dir
+    work_dir.mkdir(parents=True, exist_ok=True)
+    build_log = work_dir / _BUILD_LOG_NAME
+    # Commit hashes/branch names are not chronological. Never select an old
+    # dist/*.whl by lexical order or mtime; isolate this invocation's output.
+    current_wheel_dir = work_dir / (".fla-npu-wheel-" + uuid4().hex)
+    current_wheel_dir.mkdir()
     command = [
         sys.executable,
         "-m",
@@ -666,7 +703,7 @@ def main() -> int:
         "--no-deps",
         ".",
         "-w",
-        str(wheel_dir),
+        str(current_wheel_dir),
     ]
 
     env = os.environ.copy()
@@ -679,16 +716,7 @@ def main() -> int:
         _report_build_log(build_log)
         raise subprocess.CalledProcessError(returncode, command)
 
-    # The wheel is tagged for the host platform and (outside PyPI mode) the
-    # build tag carries the SoC, so resolve the actual file instead of
-    # predicting the full name -- but the distribution name is decided by the
-    # build mode (tiered PyPI name vs. the base name), so filter on it.
-    wheel_files = sorted(wheel_dir.glob(f"{get_wheel_dist_name()}-*.whl"))
-    if not wheel_files:
-        raise RuntimeError(f"Expected wheel was not produced under {wheel_dir}")
-    wheel_path = wheel_files[-1]
-
-    _inject_runtime_pins(wheel_path)
+    wheel_path = _publish_built_wheel(current_wheel_dir, wheel_dir)
 
     print(f"[fla-npu build] Wheel: {wheel_path}", flush=True)
     print(f"[fla-npu build] Build log: {build_log}", flush=True)

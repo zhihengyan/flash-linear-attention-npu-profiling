@@ -489,3 +489,92 @@ UT/ATK README 的当前新增段落、api/design/timer_flow 与上述实现及�
 既有 `prepare kernel 缺少非 exp2 模式的局部指数换底选择` 未修复，上一轮失败结论继续有效。
 没有执行真实 wheel 安装、torch.save/load、CANN 注册表初始化、编译、NPU 采集或正式 ATK 验收；
 初始化顺序与缓存发布两个源码修复的目标设备效果均仍待复测。
+
+## 2026-10-12 本轮 wheel 产物选择独立收尾审核
+
+本轮由未参与实现的 Step 9 子 agent 使用 fresh context 执行，只追加本报告，未编辑实现。
+先读取根 AGENTS、开发者指南的编包/安装章节、阶段 05、项目级 op-timer-ascendc Step 9、
+当前 timer_flow/design、算子与 UT/ATK README，再独立阅读最终 diff、setup.py、
+build.sh、归档 manifest 实现和测试。
+本轮只修 profiling 所依赖的 wheel 产物选择；不改变计时打点、数学计算或同步。
+
+**结论：修订后源码 Step 9 审核通过，28 项离线/模拟合同实际通过。
+未执行真实 CANN 编包、wheel 安装或 NPU 采集，用户修复后的完整 raw 仍待复测。**
+上文历史失败、旧设备观察、Prepare 非 exp2 ABI 合同失败和硬件验收边界全部保留。
+
+### 三方反馈与问题范围
+
+本轮收到的只读反馈为：host.so 与 Python 已匹配当前源码，13 个 GDN 相关 kernel .o 与
+build/lib 不匹配；所选 wheel 为
+`flash_linear_attention_npu_a5-26.10.0+main.devf9ba043-py3-none-manylinux_2_34_x86_64.whl`。
+其中一个 Prepare .o 的 installed/wheel MD5 同为 `48919b5c936e926a0acc1de831f94709`，
+build/lib MD5 为 `2255ac8617e58a986c08a3da4dc8fadd`。
+这些是目标环境提供的文件比对结果，本机未读取实际归档、已安装文件或原设备 raw。
+字节差异只证明该归档与当前 staging 不一致，单独不能证明文件年龄或编译正确性。
+
+独立查看 HEAD 的旧脚本：从目标目录匹配发行名 wheel 后按文件名排序取最后一个，
+因此提交号字典序可能选中旧 wheel。新回归使用新 `dev9b0ff19` 与旧 `devf9ba043`，
+确认 NEW < OLD，却打印并发布本次 backend 产生的 NEW，而不是旧归档。
+
+### 本轮来源、校验、发布与失败行为
+
+以下行号按本轮最终工作树定位，路径相对于仓库根目录。
+
+| 检查 | 源码与独立证据 |
+| --- | --- |
+| 本轮唯一输出 | `scripts/build_wheel.py:693` 创建 UUID 独立目录，`:706` 只向该目录传 pip -w；`:421` 要求恰一个正确发行名 wheel。未从已有目标 wheel 的文件名或 mtime 推断本轮产物 |
+| staging 来源 | `setup.py:368` 重建 run 包，build.sh `:1687/:1688` 清理 build/output/build_out；`FlaNpuBuildPy:721` 删除旧 built package 后执行 build_py，`:726` 安装本轮 run 到当前 build_lib/opp。OPP staging 没有被 bdist_wheel 结束后的残留清理删除 |
+| 完整 OPP hash 范围 | `_publish_built_wheel:425` 要求 build/lib*/fla_npu 下唯一 OPP staging；`:428/:429` 对照相对路径集合与每文件 SHA-256，拒绝空 staging、缺失、额外和变更文件。包含所有算子的 kernel .o、host/tiling/proto/op_api so、配置与脚本，不只检查 GDN 或 host。复用目录 manifest 的既有规则排除 __pycache__ 中生成的 .pyc，不宣称对这类运行缓存验收 |
+| 归档/legacy 兼容 | manifest 归一 root、.data/purelib、.data/platlib 为 installed-relative fla_npu/opp 路径；lib 和 legacy lib.linux-x86_64-cpython-311 staging 模拟均通过。只有唯一 staging 才发布，歧义明确失败 |
+| metadata 与覆盖 | `:436` 先验证 OPP 再调用既有 runtime pin 注入；三种布局注入前后 OPP manifest 均相同。随后重新 mkdir 目标并 Path.replace；正常 dist 内不同文件名旧归档保留，同名归档由当前验证产物替换 |
+| 中间目录兼容 | 初版将独立目录放入 --wheel-dir 下，若选 build/build_out/output 会被已有 clean 删除。独立报告后实现改为 `:687/:688` 将隔离输出和日志放入根 dist，验证后重新创建目标目录。新合同对三个中间目录下的子目录分别模拟清理，均成功发布；目标旧内容仍受原构建清理规则约束 |
+| 失败保留 | pip 非零不进入 publication，不回退旧归档；数量/发行名/staging/hash 异常在 replace 之前失败。hash 不匹配保留隔离 wheel，在发布环节不触碰目标归档，并打印缺失/额外/变更路径；不打印安装命令。成功只 rmdir 空独立目录，没有递归清理失败归档 |
+| 准确命令 | main `:719` 使用 publication 返回的实际路径；`:721/:723` 最后打印绝对路径与 force-reinstall/no-cache-dir/no-deps 命令。文档要求复制该命令，安装后保留默认 kernel MD5 检查，不用 --no-kernel 绕过 |
+
+审核中发现并反馈的中间输出目录兼容问题和旧归档保留条件均已收口；最终行为与文档一致。
+8 项新增测试调用真实 wrapper/main 的合成 backend；没有将模拟写 ZIP 当成 CANN 编包或实际安装。
+
+### 原图、全部 Tik/Tok 与四方一致性复核
+
+使用 git ls-files 枚举四个实际算子的 op_host/op_kernel 与共享 timer，
+逐一用 git show HEAD:<path> 比较，统一 CRLF/LF 后 **168 个文件全部相同**。
+同时重新读取真实调用点与 timer_flow 第 2/3 节，没有仅复用历史表格。
+
+| 原图方案 A 节点 | 当前实际源码位置 | 配对与锚点 |
+| --- | --- | --- |
+| Prepare Init/pack/尾 drain | Prepare raw `:27/:33/:35` | Init → op.Init → InitDone → 完整 Process → Finish；没有 loop 打点 |
+| H idle/有效 AIC、AIV Init/work-unit/chunk | H raw `:93/:129`，InitDone `:54/:64/:76` | idle 内层 return 仍到外层 Finish，每条合法核分支结束 INIT 一次 |
+| O A5/旧服务 Init/groupTask/head | O raw `:109/:116`、旧服务 `:60`、A5服务 chunk_fwd_o_a5.h `:59/:67` | AIC/AIV 分支 InitDone 成对，AIV 内层 return 返回外层 Finish；owner 握手保持 |
+| 两种 Phase6 front/H/O | arch22 `:479/:497/:632/:637/:677`；arch35 `:332/:353/:446/:451/:479` | Init/InitDone、各两个 Point、共同 Finish 与图匹配 |
+| 串行 H/O SyncAll与重叠 | arch22 `:640/:649`；arch35 `:454/:463` | Begin/End 同条件分支包围已有 SyncAll；重叠分支无 HO_WAIT，原最终会合保持 |
+| 共享 all Tik/Tok | device header `:170` → `:208` | NoBarrier 起点，末尾 Tok<Overwrite> 唯一局部 PIPE_ALL 排空 |
+| INIT 与 BODY | `:171` → `:178`；`:179` → `:209` | INIT 仍为 issue window；BODY 共用 all endCycle，不新增 drain 或越出总窗口 |
+| 瞬时点与同步窗口 | Point `:186/:187`；HoWait `:194/:201` | Point 相邻瞬时对；HoWait 以原同步为锚点，两者 NoBarrier<Overwrite> 收尾 |
+
+没有无收尾 Tik、无起点 Tok、漏标、多标或错位。固定槽顺序逐项一致：
+KERNEL_TIMING、MAIN_INIT、MAIN_BODY、PHASE6_FRONT_DONE、PHASE6_H_DISPATCH_DONE、PHASE6_HO_WAIT；
+对应 canonical 枚举、parser :60/:62 派生命名、方案 A 清单和图。
+没有实际动态枚举、setDynamicActualIter 或 Accumulate 调用。每核事件行的 GM 定向发布仍在结束时间戳之后，metadata 在绑定时由 AIC 0 发布。
+
+### 本轮独立执行结果与边界
+
+| 命令/检查 | 实际结果 |
+| --- | --- |
+| python -X utf8 -m unittest discover -s ci/tests -p test_build_wheel_publication.py -v | 最终修订 exit 0；Ran 8 tests in 0.339s；OK。初版7项0.129s亦通过，但未覆盖中间目录清理，未将初版通过视为审核完成 |
+| python -X utf8 -m unittest discover -s ci/tests -p test_install_workflows_wheel_layout.py -v | exit 0；Ran 8 tests in 0.129s；OK。正常用户权限经 auto-review 批准运行合成测试，避免已知 Windows 沙箱临时目录 ACL 干扰；未执行安装 |
+| python -X utf8 -m unittest discover -s ci/tests -p test_gdn_profile_performance.py -v | exit 0；Ran 12 tests in 0.140s；OK |
+| 最终两个修改后 Python 文件 compile() | build_wheel.py、test_build_wheel_publication.py 均通过 |
+| 原始字节/文本比较、rg 定位 | 168 个四算子 host/kernel/shared timer 与 HEAD 一致；上述全部调用点重新核对原图 |
+| 文档相对文件链接 | 开发者指南与 UT README 15 个链接目标全部存在 |
+| 提取 UT README 全部 Bash 块并执行 Git Bash --noprofile --norc -n -c | 8 个块 exit 0，仅检查语法；经 auto-review 批准正常用户运行，未执行 Docker/编包/安装/设备命令 |
+| git diff --check | exit 0，无空白错误 |
+
+最终 28 项为 8 项 publication、8 项旧布局和12 项 profiling入口离线/模拟合同。
+本轮没有重新运行既有 timer/输入快照/十项输出合同或旧 ABI 合同；历史结果与失败记录继续有效。
+修改的是公共编包入口，默认全量与按 FLA_NPU_OPS 过滤的所有发行档位均经过新增 publication 校验；
+当前模拟以 A5 命名和合成 OPP 验证该公共逻辑，不能声称其它 SoC 已真实编包安装。
+
+用户下一步需在原 A5 环境同步源码、重新完整编包并复制本轮准确安装命令，
+随后执行 host/kernel/Python 预检及完整采集。真实 wheel/OPP 加载、新 Prepare/H/O raw、
+CANN 编译、正式 ATK 精度/确定性/内存/性能、时钟和打点扰动仍待目标环境验收；
+本轮源码审核通过不代表阶段 05 正式完成。
