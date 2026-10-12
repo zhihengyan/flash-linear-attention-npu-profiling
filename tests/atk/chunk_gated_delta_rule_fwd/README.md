@@ -135,7 +135,9 @@ GDN 完整前向增加独立 profiling ACLNN/ctypes 入口，原正式 ABI、Sta
 benchmark/golden 和正式调用循环不导出。JSON、生成器、DUT 数学计算和精度规则沿用原资产。
 
 性能入口仍执行 `atk_chunk_gated_delta_rule_fwd_perf.json` 的 case 0/1，再使用 profiling UT 的
-`--inputs` 在独立进程采集同输入的逐核 Tik/Tok。安装 wheel 后的 A2 环境准备、性能命令、
+`--inputs` 在独立进程采集同输入的逐核 Tik/Tok。当前 A5 / Ascend950PR Docker 环境的进入容器、编包安装、
 CSV/Perfetto 导出、结果路径和排查方法已写入
-[profiling UT 说明](../../../fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut/README.md#安装-wheel-后使用工程性能用例采集a2)。
+[profiling UT 说明](../../../fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut/README.md)。
+安装 A5 wheel 后可从仓库根目录运行一次 `python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --device 0`，
+自动完成产物检查、原 ATK performance 测试、输入导出和同输入的独立诊断采集。默认目标固定为 ascend950。
 本机只执行离线合同验证，ATK/CANN/NPU 实测待目标环境执行。

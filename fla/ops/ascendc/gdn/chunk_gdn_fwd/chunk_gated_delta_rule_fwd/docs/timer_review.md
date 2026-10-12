@@ -251,3 +251,86 @@ O 的合法模板覆盖也已核对：`chunk_fwd_o/op_kernel/chunk_fwd_o_tiling_
 | `git diff --check` | exit 0，无输出。强制关闭 autocrlf 的额外尝试会将本 Windows 工作树 CRLF 误报为尾空白，未将该尝试当作实现缺陷 |
 
 本次扩展的**源码独立审核通过**，未发现需要修复的新增阻断项。以上 27 项是无 torch/ATK/CANN/NPU 的离线合同，不能证明真实张量序列化、设备 worker 环境继承、wheel/OPP 安装及 Profile 符号加载、两 case 实际运行、kernel 路由/核映射、GM 边界、数值验收、真实 raw/CSV/Perfetto、时钟或观察扰动通过。原审核中的既有 Prepare 合同失败和设备待验事项继续保留；用户本轮只授权源码且生产设备不可接入，本轮没有设备验收或性能结论。
+
+## 2026-10-12 A5 / Ascend950PR / Docker 单入口独立审核
+
+本节由未参与入口实现的 fresh-context 子 agent 按 skill Step 9 独立审核并追加，保留以上历史。
+审核依据为根 `AGENTS.md`、`docs/agents/05-算子测试.md`、通用和本算子 ATK README、
+项目 `.agents/skills/op-timer-ascendc/SKILL.md` Step 9，以及构建部分的 `docs/开发者指南.md` 和实际脚本。
+重新读取真实性能 JSON、旧 executor/reference/capture/parser/trace、原始流程图和实际计时代码。
+审核基准 HEAD 为 `d1d9c2545d15690319f1f6138e0a3839a0d0f525`；范围是两个 README、
+新增 `scripts/profile_performance.py` 和 `ci/tests/test_gdn_profile_performance.py`。
+本机未接入生产 Docker、ATK、CANN 或 NPU，仅能进行源码和离线验证。
+
+### 本轮发现的问题、修复及复核
+
+1. **P2：产物校验和实际加载可能使用不同 OPP。** 初版保留 `FLA_NPU_OPP_PATH`，
+   而 `scripts/verify_libcust_opapi_md5.py:146` 优先检查该覆盖目录；实际
+   `torch_custom/fla_npu/fla_npu/__init__.py:24/:70/:140` 只加载当前包内嵌 OPP。
+   因此调试覆盖可能造成错误拒绝，或用新覆盖目录替旧 wheel 通过校验。
+   最终入口 `profile_performance.py:162` 清除该变量；模拟管线注入不同调试路径并断言子进程中不存在，
+   README 同步说明。独立复核确认后续 MD5、符号和 capture 都指向当前 Python 已安装 wheel。
+2. **P2：PATH 中的 ATK 可能属于另一 Python。** 初版仅检查 CLI 存在，
+   `ATK_ENV` 未设置时可能选中全局或另一环境的 ATK，导致 worker 与后续 capture 环境不一致。
+   最终 `verify_atk_launcher:116` 同时校验 launcher 的实际 bin、shebang 解释器目录和实际解释器文件，
+   支持通过当前子进程 PATH 解析 `env python3` / `env -S python3`，无法确认时提前拒绝。
+   `ATK_PROBE:23` 和调用 `:187` 还使用当前 Python 导入 executor 所需四组 ATK API，并保存 `atk_environment.log`。
+   三项新增合同覆盖正常、跨环境/未知解释器和提前失败；独立额外模拟 venv/global Python
+   指向同一实际文件但目录不同的情形，确认仍报 `current Python environment`，没有仅凭 inode 相同放行。
+
+两项问题均由实现者修复后重新独立校验；审核者未修改入口、测试或算子实现。
+
+### Docker、环境、ATK 和同输入诊断逐项核对
+
+| 项目 | 独立证据 | 结论 |
+| --- | --- | --- |
+| Docker 主流程 | 主 UT README 的宿主机 `docker ps` / `docker exec -it -w`，后续容器 shell 与源码目录前提 | 使用已有运行容器；容器须已透传 NPU、包含本次源码并激活其 Python 环境；本机未实际执行 |
+| A5 编包安装 | README 使用 `FLA_NPU_SOC=ascend950 FLA_NPU_OPS= python scripts/build_wheel.py`，与构建脚本、发行档位和开发者指南一致；安装准确 wheel 文件名并带 force-reinstall/no-cache-dir/no-deps | 显式清除可能遗留的局部编包范围；全量 Python/host/kernel/OPP 后仅需运行一个采集入口；A2 发行包先卸载再装 A5 的顺序已说明 |
+| ROOT 与路径 | `profile_performance.py:18` 的 `parents[4]` 实算为仓库根；`:19/:20` 指向既有 ATK 与主算子 UT；所有子命令 cwd 为仓库根 | 不依赖调用者的工作目录；自定义输出和默认快照路径均解析为绝对路径 |
+| 环境继承与 OPP | 复制已激活环境，前置当前 Python bin，仅追加本算子 ATK 源目录到 PYTHONPATH；清除环境重新 source 开关和调试 OPP；定位 wheel 后在任何 NPU 子进程启动前注册 vendor | 统一 runner 不会再次切换 ATK/CANN/旧 OPP；同 Python 的 ATK probe、NPU 检查、MD5 和两 Profile 符号探测均有独立日志 |
+| ATK 参数与范围 | `:195` 调用原 `run_test_cpu.sh`，固定 `-soc=ascend950 -scope=performance` 并传设备；清空通用和性能范围；单 case 使用 start=id/end=id+1 | 对应原 `performance_device` NPU DUT 节点；默认完整 case 0/1，不启动 CPU golden 或六 ACLNN benchmark，不生成新 JSON |
+| 原模型合同 | JSON 与 HEAD 相同：case 0 为 BF16、1/16/32/11274/128/128、chunk 64、cu_seqlens=[0,11274]、确定性初态和 final_state；case 1 为 BF16、2/32/32/8192/128/128、chunk 64、定长无状态；scale 均为 0.08838834764831843 | README 表格与真实资产一致；不将其它 SoC 的旧结果作为 A5 结论 |
+| 真正同输入 | 旧 executor `:173` 保存冻结 q/k/v/g/beta，`:176` 保存原 kwargs，`:309` 仅在 DUT 初始化调用 export；capture `profile_gdn.py:134` 读取快照，`:135/:137` 移动原张量及初态 | 保留实际值、dtype、scale、chunk_size、初态、final_state、cu_seqlens、chunk_indices；不通过 JSON/seed 重建，性能循环仍无导出 |
+| 每 case 独立采集 | 入口 `:198/:207` 确认快照后按 case 启动当前 Python 的 `profile_gdn.py --inputs --check-output`，默认 warmup 5 | 正式和诊断调用使用同份输入，沿用旧十项 exact 对比；每 case 有独立 timer/output/log；原 capture 在解析/输出对比前保存 raw |
+| 失败、日志与保留 | `run_logged:67` 同步流式打印并 flush 日志，非零子进程抛错；新输出目录拒绝覆盖；缺快照/缺产物失败，metadata 记录 failed；main 返回 1 | 不会在 ATK 失败或输入未导出后继续诊断，也不会以缺失 CSV 声明 complete；既有结果目录保持 |
+| 大快照 hash | `file_sha256:108` 按 1 MiB 读取，合同对 2 MiB+17 byte 文件验证摘要 | 不将模型 .pt 整体读入内存；复制性能 JSON并保存其 hash及输入 hash |
+| 单位与 trace | 默认 cycles；只有正有限 cycles-per-us 才换算，shared-clock 必须伴随频率；两参数逐 case 转发；结果名与 parser/capture 一致 | 未核实时钟时没有虚构微秒/Perfetto；每 kernel 独立 origin，瞬时 dispatch 点不误作业务完成耗时，正式性能仍读 ATK op_summary |
+
+安装检查复用既有 `verify_libcust_opapi_md5.py`：本流程先在同一源码目录全量编包，再比较已安装产物。
+该检查器在缺少本地 build 参照时会 WARN 并跳过相应比较；本轮未修改其行为，不能把 WARN 或符号存在等同于已完成设备安装验收。
+
+### 原图、Tik/Tok、枚举和流水保持
+
+独立通过 `git ls-files` 列举主算子、Prepare、实际 ChunkFwdH/ChunkFwdO 的 host/kernel 以及共享 timer，
+逐文件与 `git show HEAD:<path>` 的 UTF-8 文本比较并统一 CRLF/LF：**168 个文件全部相同**。
+原 executor、CPU reference、性能 JSON、`profile_gdn.py`、parser、trace 和 `timer_flow.md` 七个文件也完全相同。
+以下重新定位实际源码和原图第 3/6 节，并非仅沿用历史审核结论。
+
+| 原图方案 A 节点 | 当前源码位置 | 配对与完成锚点 |
+| --- | --- | --- |
+| Prepare Init/pack/尾 drain | Prepare raw `:27/:33/:35` | Init → op.Init → InitDone → op.Process → Finish；pack 轴及最后 W/U drain 没有新增事件 |
+| H Init/work-unit/chunk | H raw `:93/:129`；idle AIC `:54`、有效 AIC `:64`、AIV `:76` InitDone | idle 内层返回仍到共同 Finish；每合法核分支有初始化终点和总收尾 |
+| O Init/groupTask/head | O raw `:109/:116`、旧服务 `:60`；A5 服务 `:59/:67` InitDone | AIC/AIV、owner/non-owner 和内层返回保持；外层共同收尾 |
+| 两种 Phase6 前端/H/O | arch22 `:479/:497/:632/:637/:677`；arch35 `:332/:353/:446/:451/:479` | 五处总 Init/Finish、全部互斥 InitDone、四个 Point 与图匹配；不新增业务循环槽 |
+| 串行 H/O SyncAll | arch22 `:640/:649`；arch35 `:454/:463` | Begin/End 在同一串行条件分支，包围原 SyncAll；重叠分支不制造 HO_WAIT，原最后会合保留 |
+| 实际 Tik/Tok | canonical device header `:144`→`:182` all；`:145`→`:152` INIT；`:153`→`:183` BODY；`:160/:161` Point；`:168/:175` HoWait | 起点均 NoBarrier；固定槽均 Overwrite；总 Tok 唯一局部 PIPE_ALL drain，BODY 共用 endCycle，Point 相邻成对；无未收尾 Tik 或无起点 Tok |
+| 枚举/命名/清单/图 | canonical header `:11`、parser `:60/:62`、timer_flow 第 3/6 节 | 六槽顺序为 KERNEL_TIMING、MAIN_INIT、MAIN_BODY、PHASE6_FRONT_DONE、PHASE6_H_DISPATCH_DONE、PHASE6_HO_WAIT；数量/顺序/名称一致，无实际动态计数或 Accumulate 打点 |
+
+### 最终独立执行证据
+
+| 命令或独立检查 | 实际输出 |
+| --- | --- |
+| `python -X utf8 -m unittest discover -s ci/tests -p test_gdn_profile_performance.py -v` | 修复后 exit 0；Ran 12 tests in 0.117s；OK。初版 9 项亦通过，但缺少上述 ATK 归属覆盖，未将初版通过视为审核完成 |
+| `python -X utf8 -m unittest discover -s ci/tests -p test_gdn_profile_input_export.py -v` | exit 0；Ran 5 tests in 0.043s；OK |
+| `python -X utf8 -m unittest discover -s ci/tests -p test_gdn_forward_output_contract.py -v` | exit 0；Ran 2 tests in 0.026s；OK |
+| `python -X utf8 -m unittest discover -s fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut -p test_timer_contract.py -v` | exit 0；Ran 20 tests in 0.141s；OK |
+| 独立 `python -X utf8 -` compile、ROOT、CLI、ATK import AST 和 shebang模拟 | 新两文件 compile()、入口 --help、ROOT/子路径通过；ATK_PROBE import 集合与 executor 完全相同；venv/global 同 inode 不同 bin 的模拟被拒绝 |
+| 独立 HEAD 文本比较、`rg -n` 定位和 README 链接检查 | 168 个 host/kernel/timer + 七个原链路文件不变；全部原打点对应原图；两个 README 的八个相对链接目标存在 |
+| 提取最新主 UT README 的 Bash 块，调用 Git Bash `--noprofile --norc -n` | exit 0；六个块语法通过，未执行任何 Docker/安装/设备命令。初次沙箱 signal pipe 被拒绝，后经 auto-review 批准仅只读语法检查后通过 |
+| `git diff --check` | exit 0，无输出 |
+
+最终结论为本轮**源码 Step 9 独立审核通过**；两个新增环境 P2 均已修复并独立重验。
+39 项是模拟/离线合同，不构成正式 ATK 阶段 05 验收或性能达标结论。
+没有实际验证 Docker 进入/透传、CANN 编包、wheel 安装/真实符号加载、ATK worker 环境继承、
+真实 torch.save/load、两条 A5 模型实测、真实 raw/CSV/trace、SoC 路由/核映射、GM 边界、
+精度/确定性/内存、时钟频率/共同时钟或打点扰动。历史既有 Prepare ABI 合同失败和设备待验项继续保留。
