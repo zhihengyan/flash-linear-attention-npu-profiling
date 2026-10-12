@@ -6,9 +6,10 @@
 
 ## 1. 来源与范围
 
-- 项目级 skill：`.agents/skills/op-timer-ascendc/SKILL.md`。
-- 克隆命令：`git clone git@gitcode.com:zhihengyan/op-timer-ascendc.git .agents/skills/op-timer-ascendc`。
-- skill 固定提交：`52e396e599a0101b00757ab575c029cb4284ad24`，许可为 MIT。
+- 初始项目级 skill：`.agents/skills/op-timer-ascendc/SKILL.md`。
+- 初始克隆命令：`git clone git@gitcode.com:zhihengyan/op-timer-ascendc.git .agents/skills/op-timer-ascendc`。
+- 初始 skill 固定提交：`52e396e599a0101b00757ab575c029cb4284ad24`，许可为 MIT。
+- 当前使用全局 skill：`~/.codex/skills/op-timer-ascendc/`；修改版对应个人仓提交 `553e3333`，项目副本已卸载。
 - 目标仓库扫描提交：`bead79ae45fca5d10a8414b215d4f762cc66538d`。
 - 仓库流程：根 `AGENTS.md`、`docs/agents/01-接口确认.md`、`03-方案设计.md`、
   `04-算子开发.md`、`05-算子测试.md`；skill 提供计时方法，仓库文件决定接口与验证流程。
