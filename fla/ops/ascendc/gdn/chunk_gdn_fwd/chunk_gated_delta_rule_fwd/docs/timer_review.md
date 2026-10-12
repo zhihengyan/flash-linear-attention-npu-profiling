@@ -334,3 +334,112 @@ O 的合法模板覆盖也已核对：`chunk_fwd_o/op_kernel/chunk_fwd_o_tiling_
 没有实际验证 Docker 进入/透传、CANN 编包、wheel 安装/真实符号加载、ATK worker 环境继承、
 真实 torch.save/load、两条 A5 模型实测、真实 raw/CSV/trace、SoC 路由/核映射、GM 边界、
 精度/确定性/内存、时钟频率/共同时钟或打点扰动。历史既有 Prepare ABI 合同失败和设备待验项继续保留。
+
+## 2026-10-12 Prepare GM 发布修复独立审核
+
+本轮由未参与实现的 Step 9 子 agent 使用 fresh context 执行，只追加此报告，未编辑实现。
+先读取根 AGENTS、阶段 03/04/05、公共 runtime 架构、项目级 op-timer-ascendc skill，
+再独立读取当前 api/design/timer_flow、UT/ATK README、git diff 和四个实际算子的源码。
+主判据为 timer_flow 第 2 节原图、第 3 节方案 A 和第 6 节最终落地映射。
+
+**结论：本轮源码 Step 9 审核通过，未发现新的阻断问题。45 项离线/模拟合同通过；
+修复后 CANN 编译和设备完整采集仍待目标环境复测。**
+上文历史缺陷、修复前观察、旧 Prepare 非 exp2 ABI 合同失败和设备待验事项全部保留。
+
+### 用户旧 raw 与源码原因
+
+用户反馈的 A5 / Ascend950PR case 0 统计为 49,216 word；PHASE6/PREPARE 全零；
+FWD_H 非零 297 word、blockDim 16、arch 310，FWD_O 非零 513 word、blockDim 28、arch 310，
+H/O 的每核三对事件完整。本轮接收的是这些旧版本统计，未在本机读取原设备 raw 文件或重新采集。
+
+独立定位 `chunk_gated_delta_rule_fwd_prepare/op_host/CMakeLists.txt:25`–`:29`：
+Ascend950PR_9599 仍配置 `-cce-aicore-dcci-before-kernel-end=false`。
+HEAD 的 canonical timer 通过 GlobalTensor 标量写 metadata/时间戳，却没有显式 DCache 发布。
+这与 Prepare 全零而 H/O 有完整记录的反馈相符，是源码中可确认的发布缺口；
+不能据此声称已排除目标设备上的旧产物加载等其它因素，或已经证明修复后的硬件行为。
+
+独立查看 [Ascend C DataCacheCleanAndInvalid 文档](https://asc.gitcode.com/api/SIMD-API/basic_api/cache_control/DataCacheCleanAndInvalid.html)：
+页面列明 Ascend950PR 支持，Scalar 访问 GM 存在 DCache 一致性问题，Clean 将脏数据写回 GM，
+GlobalTensor 原型及 64B SINGLE_CACHE_LINE 模式均与新增调用匹配。
+该模式使用目标地址；页面还注明该模式下 dcciDst 不生效，故独占且对齐的地址是发布范围的关键。
+页面来自持续开发版本，不能代替用户实际安装 CANN 的编译验证。
+
+### 发布、布局、关闭开关与时序
+
+本节共享设备头指 `fla/ops/ascendc/common/kernel_utils/gdn_timer/AscendTimerV2_device.hpp`，
+公共常量头指同目录 `AscendTimerV2.hpp`。
+
+| 检查 | 当前源码证据与结果 |
+| --- | --- |
+| header 发布 | 设备头 `:36`–`:50` 仅 AIC group 0 写 16-word header 并发布两条 cache line；GdnKernelTimer `:167` 绑定后才在 `:170/:171` 开始总窗口/INIT。其他核不写或读取 header，无新增会合 |
+| 每核行发布 | `:126`–`:147` 从本核 coreId×16 word 构造 GlobalTensor，以 8 word 步长调用 SINGLE_CACHE_LINE；Finish `:208/:209` 先保存 KERNEL/BODY 结束时间戳，`:212` 再发布本核两条 line。发布开销位于测量窗口外，实际 launch 仍承担它 |
+| 独占与边界 | 公共头的四 slice、六固定槽、布局版本 1、256×3 核容量、16-word header/row 和 TOTAL_BUFFER_SIZE=49,216 保持；每 slice 12,304 word 可整除 8。合同枚举所有 header/row 的 6,152 条缓存行，全部独占，无跨核/跨 slice line |
+| 基址对齐 | 设备头 `:22` 在任何写入前拒绝非 64B 地址；capture `:56` 在诊断 launch 前拒绝不对齐的新 timer。api.md 明确直接 C 调用者的存储责任；这不是对任意偏移 tensor 已完成设备验证的声明 |
+| null timer | Init 立即返回；Tik/Tok 和 FlushRow 均先检查有效地址，Tok 在 PIPE_ALL 前返回。正式调用无计时 GM 写入、cycle 读取、局部排空或缓存发布 |
+| ENABLE_TIMER=0 | GdnKernelTimer 所有计时操作及成员都处于 #if ENABLE_TIMER；全部实际入口使用 TIMER_BLOCK。关闭时没有到达这些发布调用的实际入口路径；未做 CANN 关闭开关编译/设备对照 |
+| 数学与同步 | 逐文件比较四算子 op_host/op_kernel 的 165 个 tracked 文件，统一 CRLF/LF 后全部与 HEAD 相同，包括 Prepare 编译选项、flags、SyncAll、计算循环与十项输出实现。当前 kernel 修改仅位于共享 timer 的对齐/定向发布逻辑 |
+
+### 原图节点、全部 Tik/Tok 与四方一致性
+
+路径相对于 `fla/ops/ascendc/gdn/chunk_gdn_fwd/`。四个实际算子中的 Phase6 有两个架构实现，
+故下表包含五处总入口/收尾；没有给同级旧 H 算子替代实际 ChunkFwdH。
+
+| 方案 A 原图节点 | 重新定位的实际调用 | 对照结果 |
+| --- | --- | --- |
+| Prepare Init/pack/尾 W/U drain | Prepare raw `:27/:33/:35` | Init → 真实 op.Init → InitDone → 完整 Process → Finish；业务 pack 循环及尾 drain 保持 |
+| H idle/有效 AIC、AIV Init/work-unit/chunk | H raw `:93/:129`，InitDone `:54/:64/:76` | 每合法核分支结束 INIT 一次；idle AIC 的内层 return 仍返回共同 Finish |
+| O Init/groupTask/head/owner 握手 | O raw `:109/:116`，旧服务 `:60`，A5 服务 `:59/:67` | 旧服务和 A5 AIC/AIV 分支都成对结束 INIT，内层返回仍到外层 Finish |
+| arch22 Phase6 front/H/O | arch22 `:479/:497/:632/:637/:677` | Init/InitDone、两调度 Point、共同 Finish 与图匹配，包含条件 O 和原最终会合 |
+| arch35 Phase6 front/H/O | arch35 `:332/:353/:446/:451/:479` | 同上，原流水和最终会合保持 |
+| 串行 H/O SyncAll；重叠分支 | arch22 `:640/:649`，arch35 `:454/:463` | Begin/End 同分支包围原 SyncAll；重叠路径两端均不执行，不制造 HO_WAIT |
+
+| 共享设备头实际起点 | 对应终点 | 配对/锚点 |
+| --- | --- | --- |
+| all TikNoBarrier `:170` | Finish Tok<Overwrite> `:208` | 总末尾仍只有原计时器的一次局部 PIPE_ALL `:84`；新增发布在它和末尾取时之后 |
+| stage INIT TikNoBarrier `:171` | InitDone TokNoBarrier<Overwrite> `:178` | 每条合法分支一次，仍明确为初始化 issue window |
+| stage BODY TikNoBarrier `:179` | Finish TokNoBarrier<Overwrite> `:209` | 共用 all.GetEndCycle，不重复 drain，不越出总窗口 |
+| Point boundary TikNoBarrier `:186` | 紧邻 TokNoBarrier<Overwrite> `:187` | 两架构各两 Point，每次瞬时对完整；不是业务完成耗时 |
+| HoWaitBegin TikNoBarrier `:194` | HoWaitEnd TokNoBarrier<Overwrite> `:201` | 两架构串行分支成对；末尾已有 SyncAll 是完成锚点 |
+
+没有无收尾 Tik、无起点 Tok、漏标、多标或错位。固定槽均 Overwrite；没有实际 Accumulate、
+动态类型或 setDynamicActualIter。枚举、parser 派生命名、方案 A 清单和图中的顺序逐项相同：
+KERNEL_TIMING、MAIN_INIT、MAIN_BODY、PHASE6_FRONT_DONE、PHASE6_H_DISPATCH_DONE、PHASE6_HO_WAIT。
+
+### 导出、诊断与原输入重放
+
+`parse_timer_csv.py:84` 的 summarize_raw 只保存四 slice 的 word_count、非零 word/核行和 header，
+没有放宽 parse_timer 的长度、metadata、缺核、配对、越窗、互斥及完整路由检查。
+新 fixture 按用户统计重建 H=16/O=28、arch=310 的合成记录，得到非零 word `[0,0,297,513]`
+和核行 `[0,0,48,84]`，仍抛 `captured=FWD_H,FWD_O; missing=PREPARE`。
+这是 synthetic 复现合同，不是用户原 raw 文件的重新验证，更不能恢复缺失时间戳。
+
+capture `:64`–`:84` 先保存 raw、hash 和 raw_summary；`:94` 的 exact 输出比较现在先于 `:102` 的解析。
+解析失败写 decode_status=failed 和 decode_error 后原样抛错；输出不一致则保留 raw，
+记录失败并停止，decode_status=pending 不冒称已解码。合成成功/缺 slice/输出不一致/不对齐四种采集路径均通过。
+十项真实 NPU 输出一致性仍未验收。
+
+UT README 的新重试命令先要求同步源码并全量重建安装 A5 wheel，然后以 `--inputs` 读取
+原运行目录的 case_0.pt；加载路径继续使用保存的实际 tensor/kwargs，不重新构造模型输入，
+新输出目录含 retry 时间戳，原 raw 与输入保留。`--check-output`、warmup=5、device=0
+都是真实 CLI 参数；重试不执行 ATK 性能循环。真实 torch.save/load 与目标设备复跑尚未执行。
+UT/ATK README 的当前新增段落、api/design/timer_flow 与上述实现及验证边界一致。
+
+### 本轮独立执行证据与边界
+
+| 命令/检查 | 实际结果 |
+| --- | --- |
+| `python -X utf8 -m unittest discover -s fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut -p test_timer_contract.py -v` | exit 0；Ran 26 tests in 0.292s；OK |
+| `python -X utf8 -m unittest discover -s ci/tests -p test_gdn_profile_performance.py -v` | exit 0；Ran 12 tests in 0.141s；OK |
+| `python -X utf8 -m unittest discover -s ci/tests -p test_gdn_profile_input_export.py -v` | exit 0；Ran 5 tests in 0.045s；OK |
+| `python -X utf8 -m unittest discover -s ci/tests -p test_gdn_forward_output_contract.py -v` | exit 0；Ran 2 tests in 0.029s；OK |
+| `python -X utf8 tests/atk/chunk_gated_delta_rule_fwd/aclnn_abi_contract.py` | exit 1；仍为 `prepare kernel 缺少非 exp2 模式的局部指数换底选择`。相关算法头与 HEAD 相同，本轮未修复或隐藏 |
+| Python compile()、`profile_gdn.py --help` | 三个修改后的 Python 文件语法通过；CLI help exit 0，含重放命令使用的参数 |
+| 独立 git ls-files/git show 文本比较、rg 定位 | 165 个四算子 host/kernel 文件不变；全部实际观察节点和共享 Tik/Tok 重新定位匹配 |
+| 相对链接与 Bash 语法 | UT/ATK README 与 api/design/timer_flow 中 8 个相对链接目标存在；7 个 UT Bash 块经 Git Bash --noprofile --norc -n -c 通过。首次沙箱 signal pipe 启动失败；随后只读语法检查经 auto-review 批准通过，未执行任何 Docker/安装/设备命令 |
+| `git diff --check` | exit 0；无空白错误，仅 Git 的既有 LF/CRLF 提示 |
+
+本机 PATH 和常见 LLVM/MSYS/Miniforge/Visual Studio 路径未找到可用 C++ compiler，
+没有执行 C++ stub、CANN 编译或设备调用，不能把 Python 合同解释为任何编译结果。
+45 项均为离线/模拟证据；用户旧 H/O 完整记录是修复前反馈。
+修复后的真实 Prepare/H/O 完整采集、新 wheel/OPP 实际加载、GM 边界、正式精度/确定性/内存/性能、
+时钟与打点扰动仍待生产环境复测；本轮源码审核通过不代表阶段 05 正式验收完成。

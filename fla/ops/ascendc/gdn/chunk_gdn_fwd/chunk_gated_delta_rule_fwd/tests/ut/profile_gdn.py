@@ -12,7 +12,7 @@ import json
 import os
 from pathlib import Path
 
-from parse_timer_csv import HEADER_PATH, TOTAL_BUFFER_SIZE, parse_and_dump, print_summary, validate_frequency
+from parse_timer_csv import HEADER_PATH, LAYOUT, TOTAL_BUFFER_SIZE, parse_and_dump, print_summary, summarize_raw, validate_frequency
 from trace_parser import generate_trace_json
 
 
@@ -53,6 +53,8 @@ def capture(q, k, v, g, beta, *, output_dir, warmup=5, check_output=False,
         baseline = adapter.npu_chunk_gated_delta_rule_fwd(q, k, v, g, beta, **kwargs) if check_output else None
         torch.npu.synchronize(device)
         timer = torch.zeros(TOTAL_BUFFER_SIZE, dtype=torch.int64, device=device)
+        if timer.data_ptr() % LAYOUT["CACHE_LINE_BYTES"]:
+            raise ValueError("timer storage must be cache-line aligned for per-core GM publication")
         outputs = adapter._profile_chunk_gated_delta_rule_fwd(q, k, v, g, beta, timer=timer, **kwargs)
         torch.npu.synchronize(device)
         # Copy raw evidence before any further launch or output-comparison failure.
@@ -76,11 +78,11 @@ def capture(q, k, v, g, beta, *, output_dir, warmup=5, check_output=False,
         "cycles_per_us": cycles_per_us, "shared_clock_asserted": shared_clock,
         "header_sha256": hashlib.sha256(HEADER_PATH.read_bytes()).hexdigest(),
         "raw_sha256": hashlib.sha256(raw_path.read_bytes()).hexdigest(),
-        "output_comparison": "not requested",
+        "raw_summary": summarize_raw(raw), "decode_status": "pending",
+        "output_comparison": "pending" if baseline is not None else "not requested",
     }
     meta_path = output_dir / "capture_metadata.json"
     meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-    metadata["kernels"] = export(raw_path, output_dir, cycles_per_us, shared_clock)
     if baseline is not None:
         try:
             for index, (expected, actual) in enumerate(zip(baseline, outputs)):
@@ -95,6 +97,15 @@ def capture(q, k, v, g, beta, *, output_dir, warmup=5, check_output=False,
             metadata["output_comparison"] = "failed; raw retained, run precision investigation"
             meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
             raise
+    # Preserve numerical evidence even if decoding fails because a slice is absent.
+    try:
+        metadata["kernels"] = export(raw_path, output_dir, cycles_per_us, shared_clock)
+        metadata["decode_status"] = "complete"
+    except Exception as error:
+        metadata["decode_status"] = "failed"
+        metadata["decode_error"] = str(error)
+        meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        raise
     meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     return outputs
 

@@ -81,6 +81,20 @@ def read_raw(path):
     return result
 
 
+def summarize_raw(raw):
+    """Keep missing-slice evidence even when strict decoding cannot complete."""
+    summaries = []
+    stride = LAYOUT["N_TIMING_COUNTER_PER_CORE_ALIGN"]
+    for kernel_id, kernel in KERNEL_NAMES.items():
+        offset = kernel_id * LAYOUT["BUFFER_WORDS_PER_KERNEL"]
+        data = raw[offset:offset + LAYOUT["BUFFER_WORDS_PER_KERNEL"]]
+        rows = data[LAYOUT["HEADER_WORDS"]:]
+        summaries.append({"kernel": kernel, "nonzero_words": sum(value != 0 for value in data),
+                          "header": data[:LAYOUT["HEADER_WORDS"]],
+                          "nonzero_core_rows": sum(any(rows[i:i + stride]) for i in range(0, len(rows), stride))})
+    return {"word_count": len(raw), "slices": summaries}
+
+
 def parse_timer(raw):
     if len(raw) != TOTAL_BUFFER_SIZE:
         raise ValueError(f"raw length {len(raw)} != TOTAL_BUFFER_SIZE {TOTAL_BUFFER_SIZE}")
@@ -148,7 +162,9 @@ def parse_timer(raw):
     if "PHASE6" in kernels and len(kernels) != 1:
         raise ValueError("mutually exclusive GDN routes appear in one buffer; zero before each call")
     if "PHASE6" not in kernels and kernels != {"PREPARE", "FWD_H", "FWD_O"}:
-        raise ValueError("incomplete Prepare/H/O capture")
+        missing = {"PREPARE", "FWD_H", "FWD_O"} - kernels
+        raise ValueError(f"incomplete Prepare/H/O capture: captured={','.join(sorted(kernels))}; "
+                         f"missing={','.join(sorted(missing))}; keep raw/metadata and check timer GM publication and loaded kernels")
     return events, metadata
 
 

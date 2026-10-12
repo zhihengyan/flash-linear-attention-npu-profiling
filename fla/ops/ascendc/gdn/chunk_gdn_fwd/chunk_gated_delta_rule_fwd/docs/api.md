@@ -37,6 +37,7 @@ OPTIONAL INT64 ND `timer`，raw kernel 同位置接收 `timerAddr`，原输出�
 | shape/dtype/format | 一维、连续、ND、INT64，元素数至少为共享头的 `AscendTimer::TOTAL_BUFFER_SIZE` |
 | 当前布局 | 49,216 个 int64，393,728 字节；使用常量分配，不能把当前数值写死在调用代码 |
 | device | 与 q 同一个 NPU；Python 诊断 helper 校验，直接 C 调用方负责使用同设备存储 |
+| 地址对齐 | timer 基址须 64B 对齐，通常使用独立的 torch.zeros 分配；采集脚本校验，直接 C 调用方负责提供对齐存储。kernel 对未对齐地址不写记录，解析时报告无采集事件 |
 | 生命周期 | 启动前清零；保持存活直到该 stream 完成；导出前执行 NPU synchronize |
 | 所有权 | 独立于计算输入、输出和 workspace；不同并发调用必须使用不同 timer |
 | 可选性 | 正式调用传空，诊断 L2 调用必须非空；无空输入采集事件 |

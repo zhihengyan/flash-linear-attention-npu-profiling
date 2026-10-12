@@ -105,6 +105,11 @@ Python chunk_gated_delta_rule_fwd
 新路径 H 使用 `chunk_fwd_h`；同级 `chunk_gated_delta_rule_fwd_h` 是另一算子。
 Phase6 还使用自己的私有算子副本，不能通过修改同级 H/O 源码自动覆盖。
 
+2026-10-12 GM 发布修复不改变上图业务节点或方案 A 的 Tik/Tok 位置：
+绑定 timer 时，AIC 0 在总 Tik 前逐 cache line 写回 metadata；共同 Finish 在两个结束时间戳保存后
+逐 cache line 写回本核事件行。Prepare 显式关闭编译器的 kernel-end DCCI，因此不能依赖自动写回。
+只操作 timer 的独占 cache line，保留原有 flags、SyncAll 和流水；细节见 `design.md` 的 GM 发布节。
+
 ## 3. 两种候选方案
 
 两个方案都覆盖同一前向入口的两条路径。初次设备验收按实际目标 SoC 执行，

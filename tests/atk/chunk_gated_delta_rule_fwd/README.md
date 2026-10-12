@@ -141,3 +141,14 @@ CSV/Perfetto 导出、结果路径和排查方法已写入
 安装 A5 wheel 后可从仓库根目录运行一次 `python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --device 0`，
 自动完成产物检查、原 ATK performance 测试、输入导出和同输入的独立诊断采集。默认目标固定为 ascend950。
 本机只执行离线合同验证，ATK/CANN/NPU 实测待目标环境执行。
+
+## Prepare 计时 GM 发布修复（2026-10-12）
+
+用户 A5 case 0 反馈的旧 raw 有完整 H/O（16/28 核组），Prepare 区段全零，严格解析失败。
+Prepare 的 kernel-end DCCI 自动写回已在编译配置中关闭，旧计时器遗漏了显式 DCache 写回。
+共享 timer 现定向发布 metadata 与各核独占 cache line，保持六阶段、原计算/同步及完整性要求；
+修复涉及 Phase6、Prepare、ChunkFwdH、ChunkFwdO 使用的同一共享头，需要全量重建安装 A5 wheel。
+采集失败时保存 raw 区段统计和输出对比证据，原输入可在独立进程复用，重试命令见上面的 UT 说明。
+
+本轮 26 项 timer、12 项入口、5 项快照、2 项输出合同通过，均为离线/模拟证据；
+用户旧版本反馈不证明修复后完整采集或任何正式 ATK 精度、内存、性能验收通过，设备复测仍待执行。

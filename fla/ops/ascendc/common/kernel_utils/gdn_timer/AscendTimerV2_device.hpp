@@ -18,7 +18,8 @@ public:
     {
         tAddr_ = nullptr;
         valid_ = false;
-        if (timerAddr == nullptr) {
+        // Rows must own whole cache lines; never flush a neighbour's storage.
+        if (timerAddr == nullptr || reinterpret_cast<uint64_t>(timerAddr) % AscendTimer::CACHE_LINE_BYTES != 0) {
             return;
         }
         uint32_t group = AscendC::GetBlockIdx();
@@ -46,6 +47,7 @@ public:
 #if defined(__CCE_AICORE__)
                 header(8) = __CCE_AICORE__;
 #endif
+                FlushCacheLines(header, AscendTimer::HEADER_WORDS);
             }
         }
         // Do not redirect an out-of-range core to core zero.
@@ -121,7 +123,31 @@ public:
 
     __aicore__ inline int64_t GetEndCycle() const { return endCycle_; }
 
+    __aicore__ inline void FlushRow()
+    {
+        if (tAddr_ == nullptr) {
+            return;
+        }
+        AscendC::GlobalTensor<int64_t> row;
+        row.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(tAddr_) +
+                           coreId_ * AscendTimer::N_TIMING_COUNTER_PER_CORE_ALIGN);
+        FlushCacheLines(row, AscendTimer::N_TIMING_COUNTER_PER_CORE_ALIGN);
+    }
+
 private:
+    __aicore__ static inline void FlushCacheLines(const AscendC::GlobalTensor<int64_t> &data, int words)
+    {
+        static_assert(AscendTimer::CACHE_LINE_WORDS * sizeof(int64_t) == AscendTimer::CACHE_LINE_BYTES);
+        static_assert(AscendTimer::HEADER_WORDS % AscendTimer::CACHE_LINE_WORDS == 0);
+        static_assert(AscendTimer::N_TIMING_COUNTER_PER_CORE_ALIGN % AscendTimer::CACHE_LINE_WORDS == 0);
+        // Scalar GM stores stay in DCache. Prepare explicitly disables the
+        // compiler's end-of-kernel DCCI, so PIPE_ALL alone cannot publish them.
+        for (int word = 0; word < words; word += AscendTimer::CACHE_LINE_WORDS) {
+            AscendC::DataCacheCleanAndInvalid<int64_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
+                                            AscendC::DcciDst::CACHELINE_OUT>(data[word]);
+        }
+    }
+
     GM_ADDR tAddr_ = nullptr;
     uint32_t coreId_ = 0;
     int64_t startCycle_ = 0;
@@ -181,6 +207,9 @@ public:
 #if ENABLE_TIMER
         all_.template Tok<Overwrite>(AscendTimer::KERNEL_TIMING_IDX);
         stage_.template TokNoBarrier<Overwrite>(AscendTimer::MAIN_BODY, all_.GetEndCycle());
+        // Publish only this core's timer row, after both measured end stamps.
+        // No whole-cache flush or extra business/cross-core synchronization.
+        all_.FlushRow();
 #endif
     }
 

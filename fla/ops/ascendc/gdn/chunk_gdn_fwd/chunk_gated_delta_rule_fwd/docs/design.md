@@ -22,6 +22,25 @@ PHASE6=0、PREPARE=1、FWD_H=2、FWD_O=3。
 metadata 含 magic、version、kernel ID、实际 AIC blockDim、容量、stride、事件数、ENABLE_TIMER 和编译 arch。
 未启动 slice、未执行等待和 padding 保持零；解析器拒绝不完整路由、缺核、版本不匹配及超限。
 
+### 标量写入的 GM 发布（2026-10-12 修复）
+
+Prepare 的 `op_host/CMakeLists.txt` 在 Ascend950PR_9599 上设置
+`-cce-aicore-dcci-before-kernel-end=false`。Scalar 写 GlobalTensor 首先更新本核 DCache，
+末尾 PIPE_ALL 不能代替显式缓存写回；先前实现遗漏此步骤，用户设备 raw 的 Prepare slice 全零，
+而 H/O 分别有 16/28 个完整核组。旧 raw 没有 Prepare 时间戳，不能靠放宽解析规则补齐。
+
+现在 AIC 0 写完 header 后、总计时起点之前，逐 64B cache line 发布 128B metadata；
+每核在 KERNEL_TIMING 与 MAIN_BODY 都写完之后，逐 cache line 发布自己的 128B 行。
+使用 `DataCacheCleanAndInvalid<int64_t, SINGLE_CACHE_LINE, CACHELINE_OUT>`，
+不刷新整个 DCache、不增加跨核同步、不更改 Prepare 的自动写回编译选项。
+结束时间戳在数据发布之前读取，CSV 不将发布开销算入业务窗口；实际 launch 仍会承担该诊断开销。
+该 API 的缓存语义和 Ascend950PR 支持见
+[Ascend C 文档](https://asc.gitcode.com/api/SIMD-API/basic_api/cache_control/DataCacheCleanAndInvalid.html)。
+
+timer 基址需 64B 对齐，现有 slice/header/row 尺寸均为整 cache line，写者互不共享 cache line。
+采集脚本校验新分配 timer 的地址；kernel 对未对齐 timer 不写记录，避免发布相邻核/存储的脏数据。
+布局版本、四个 slice 和六个阶段保持不变；null timer 与 ENABLE_TIMER=0 不执行发布。
+
 ## 观察阶段与锚点
 
 | 槽 | 核心对象/起点 | 终点 | 解释 |
@@ -41,6 +60,7 @@ INIT 没有完成锚点，刻意按 issue 窗口命名和解析，不用额外 b
 
 起点均 NoBarrier；三对象避免总计时和阶段计时互相覆盖。
 最后 only timer!=nullptr 时执行一次局部 PIPE_ALL；null timer 不执行 GM 写入、cycle 读取或新增 barrier。
+两项结束时间戳保存后只发布本核 timer 行；header 在绑定时由 AIC 0 发布，均不属于新增业务同步。
 ENABLE_TIMER 使用可覆写默认值与 `#if ENABLE_TIMER`；编译为 0 时 GdnKernelTimer 没有计时成员。
 不添加 SyncAll、CrossCore flag、event 或 ready/free，不修改原有 workspace 生命周期和流水重叠。
 

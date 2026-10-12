@@ -29,6 +29,8 @@ enum KernelSlice {
 static constexpr int LAYOUT_VERSION = 1;
 static constexpr int HEADER_MAGIC = 0x47444e54;
 static constexpr int HEADER_WORDS = 16;
+static constexpr int CACHE_LINE_BYTES = 64;
+static constexpr int CACHE_LINE_WORDS = CACHE_LINE_BYTES / 8;
 // Reserved capacity, NOT a claim about the physical core count of any SoC.
 // Init records actual AIC blockDim; the parser rejects capacity overflow.
 static constexpr int CORE_GROUP_CAPACITY = 256;

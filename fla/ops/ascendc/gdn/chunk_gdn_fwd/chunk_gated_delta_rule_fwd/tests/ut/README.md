@@ -111,6 +111,8 @@ tests/atk/chunk_gated_delta_rule_fwd/atk_output/gdn_timer_<运行标识>/
 ```
 
 先看 `run_metadata.json` 的 status，再看各 case 的 metadata 和 profiling.log。
+capture metadata 的 raw_summary 记录四个区段的非零 word/核行数；decode_status/decode_error 记录解析结果。
+十项输出对比在解析之前完成，即使某段记录缺失，仍会保存对比结果和 raw。
 同一 kernel、同一核类型内比较 KERNEL_TIMING / MAIN_BODY，观察负载差异；实际路由以 metadata 为准。
 默认单位为 **cycles**，`Perfetto skipped` 是未确认时钟时的预期提示。
 
@@ -152,6 +154,28 @@ done
 
 ## 排查与验证边界
 
+### Prepare 全零 / incomplete Prepare/H/O capture
+
+2026-10-12 用户在 A5 case 0 反馈：raw 长度 49,216，Prepare 全零，H/O 分别完整记录 16/28 个核组。
+源码中的 Prepare 编译选项关闭自动 kernel-end DCCI，旧 timer 实现又缺少显式缓存写回。
+本轮修复在计时窗口外定向写回 metadata 和每核 timer 行，保留完整性校验；旧 raw 缺失的时间戳无法恢复。
+
+这包含 kernel 修改，必须同步源码后**重新编包安装**，仅更新 Python 不足以修复。
+按第 2 节重建安装 A5 wheel 后，可以复用已保存的 case_0.pt，只重跑诊断，无需再执行 ATK 性能用例：
+
+```bash
+# 仓库根目录；RUN_DIR 改为之前入口打印的那一轮目录。
+RUN_DIR="$PWD/tests/atk/chunk_gated_delta_rule_fwd/atk_output/你的原运行目录名"
+UT=fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut
+python "$UT/profile_gdn.py" --inputs "$RUN_DIR/inputs/case_0.pt" \
+  --device 0 --warmup 5 --check-output \
+  --output-dir "$RUN_DIR/timer/case_0_retry_$(date +%Y%m%d_%H%M%S)"
+```
+
+成功应生成三个 kernel 的逐核 CSV；metadata 的 decode_status 为 complete，十项输出 exactly match。
+若仍缺 Prepare，保留新的 raw/metadata/log，核对新 wheel/OPP 的实际加载与重建结果，不删除该完整性检查。
+本机无 CANN/NPU，修复后的设备结果待复测；上述反馈只证明旧版本的 H/O 记录存在。
+
 | 现象 | 处理 |
 | --- | --- |
 | 找不到 atk / NPU 或环境检查失败 | 检查容器 NPU 透传、CANN source 和当前 Python/ATK 环境 |
@@ -162,7 +186,7 @@ done
 | raw 无事件、缺核或坏布局 | 保留 raw/metadata/日志，核查新 kernel、ENABLE_TIMER 和实际路由 |
 | 十项 exact 对比失败 | raw 会保留；按输出有效区定位差异，不直接放宽阈值形成通过结论 |
 
-一键入口的环境和调度通过 12 项模拟合同，既有输入导出 5 项、输出合同 2 项、timer 合同 20 项通过。
+一键入口的环境和调度通过 12 项模拟合同，既有输入导出 5 项、输出合同 2 项、timer 合同 26 项通过。
 这些不代表 Docker、真实 torch.save/load、CANN 编译、两条 A5 case 实测、精度、内存、时钟或扰动验收通过。
 既有 ABI 合同失败 `prepare kernel 缺少非 exp2 模式的局部指数换底选择` 继续保留，未在本轮修复。
 源码审核证据见[独立审核](../../docs/timer_review.md)，阶段和枚举见[打点流程](../../docs/timer_flow.md)，

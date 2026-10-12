@@ -10,11 +10,12 @@ import types
 import unittest
 import shutil
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from unittest import mock
 
 import parse_timer_csv as parser
+import profile_gdn as capture_tool
 from trace_parser import generate_trace_json
 
 OP = Path(__file__).resolve().parents[2]
@@ -37,15 +38,15 @@ def test_directory():
         shutil.rmtree(path)
 
 
-def fixture(kernels=("PHASE6",), *, wait=True, origin=1000):
+def fixture(kernels=("PHASE6",), *, wait=True, origin=1000, groups=1, arch=220):
     raw = [0] * parser.TOTAL_BUFFER_SIZE
     for kernel in kernels:
         kernel_id = next(i for i, name in parser.KERNEL_NAMES.items() if name == kernel)
         offset = kernel_id * SLICE
         raw[offset:offset + 9] = [parser.LAYOUT["HEADER_MAGIC"], parser.LAYOUT["LAYOUT_VERSION"], kernel_id,
-                                 1, parser.LAYOUT["CORE_GROUP_CAPACITY"], STRIDE,
-                                 len(parser.FIXED_TIMING_NAMES), 1, 220]
-        for core in range(3):
+                                 groups, parser.LAYOUT["CORE_GROUP_CAPACITY"], STRIDE,
+                                 len(parser.FIXED_TIMING_NAMES), 1, arch]
+        for core in range(groups * parser.LAYOUT["CORES_PER_GROUP"]):
             base = offset + HEADER + core * STRIDE
             pairs = [(origin, origin + 100), (origin + 1, origin + 2), (origin + 3, origin + 100)]
             if kernel == "PHASE6":
@@ -57,6 +58,31 @@ def fixture(kernels=("PHASE6",), *, wait=True, origin=1000):
 
 
 class TimerParserTest(unittest.TestCase):
+    def test_cache_lines_are_owned_by_one_header_or_core_row(self):
+        words = parser.LAYOUT["CACHE_LINE_WORDS"]
+        self.assertEqual(words * 8, parser.LAYOUT["CACHE_LINE_BYTES"])
+        owners = {}
+        for kernel in parser.KERNEL_NAMES:
+            base = kernel * SLICE
+            regions = [("header", base, HEADER)] + [
+                (core, base + HEADER + core * STRIDE, STRIDE) for core in range(parser.LAYOUT["N_CORE_COUNT"])]
+            for owner, start, size in regions:
+                self.assertEqual((start % words, size % words), (0, 0))
+                for word in range(start, start + size, words):
+                    self.assertNotIn(word, owners)
+                    owners[word] = (kernel, owner)
+        self.assertEqual(len(owners) * words, parser.TOTAL_BUFFER_SIZE)
+
+    def test_reported_a5_missing_prepare_is_diagnosed_and_stays_invalid(self):
+        raw = [a + b for a, b in zip(fixture(("FWD_H",), groups=16, arch=310),
+                                    fixture(("FWD_O",), groups=28, arch=310))]
+        summary = parser.summarize_raw(raw)
+        self.assertEqual(summary["word_count"], parser.TOTAL_BUFFER_SIZE)
+        self.assertEqual([row["nonzero_words"] for row in summary["slices"]], [0, 0, 297, 513])
+        self.assertEqual([row["nonzero_core_rows"] for row in summary["slices"]], [0, 0, 48, 84])
+        with self.assertRaisesRegex(ValueError, "captured=FWD_H,FWD_O; missing=PREPARE"):
+            parser.parse_timer(raw)
+
     def test_shared_header_names_and_capacity(self):
         self.assertEqual(list(parser.FIXED_TIMING_NAMES.values()), ["KERNEL_TIMING", "MAIN_INIT", "MAIN_BODY",
                          "PHASE6_FRONT_DONE", "PHASE6_H_DISPATCH_DONE", "PHASE6_HO_WAIT"])
@@ -161,6 +187,71 @@ def load_adapter():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+class TimerCaptureEvidenceTest(unittest.TestCase):
+    def capture_synthetic(self, raw, directory, *, mismatch=False, address=64):
+        device = types.SimpleNamespace(type="npu")
+        inputs = [types.SimpleNamespace(device=device, shape=(1, 1, 1, 128), dtype="synthetic") for _ in range(5)]
+        timer = types.SimpleNamespace(data_ptr=lambda: address,
+                                      cpu=lambda: types.SimpleNamespace(tolist=lambda: raw))
+        torch = types.ModuleType("torch")
+        torch.__version__, torch.int64 = "synthetic", object()
+        torch.npu = types.SimpleNamespace(device=lambda value: nullcontext(), synchronize=lambda value: None,
+                                         get_device_name=lambda value: "synthetic; no NPU")
+        torch.no_grad, torch.zeros = nullcontext, lambda *args, **kwargs: timer
+        compare = mock.Mock(side_effect=lambda actual, expected, **kwargs: self.assertEqual(actual, expected))
+        torch.testing = types.SimpleNamespace(assert_close=compare)
+        adapter = types.SimpleNamespace(__file__=__file__, npu_chunk_gated_delta_rule_fwd=lambda *args, **kwargs: tuple(range(10)),
+                                        _profile_chunk_gated_delta_rule_fwd=mock.Mock(return_value=tuple(range(9)) + (999 if mismatch else 9,)))
+        runtime = types.SimpleNamespace(runtime=lambda: types.SimpleNamespace(_libraries=[]))
+        packages = {name: types.ModuleType(name) for name in ("fla_npu", "fla_npu.ops", "fla_npu.ops.ascendc")}
+        packages["fla_npu.ops.ascendc"]._aclnn_ctypes = adapter
+        packages["fla_npu.ops.ascendc"]._runtime = runtime
+        with mock.patch.dict(sys.modules, {"torch": torch, **packages}):
+            try:
+                capture_tool.capture(*inputs, output_dir=directory, warmup=0, check_output=True)
+            finally:
+                self.compare, self.profile_launch = compare, adapter._profile_chunk_gated_delta_rule_fwd
+
+    def test_complete_capture_exports_after_output_comparison(self):
+        with test_directory() as directory:
+            self.capture_synthetic(fixture(("PREPARE", "FWD_H", "FWD_O")), directory)
+            metadata = json.loads((directory / "capture_metadata.json").read_text())
+            self.assertEqual(metadata["decode_status"], "complete")
+            self.assertEqual(metadata["output_comparison"], "ten outputs exactly match uninstrumented call")
+            self.assertEqual({row["kernel"] for row in metadata["kernels"]}, {"PREPARE", "FWD_H", "FWD_O"})
+            self.assertTrue((directory / "gdn_npu_time_parsed.csv").is_file())
+
+    def test_missing_slice_keeps_raw_summary_and_completed_output_comparison(self):
+        with test_directory() as directory, self.assertRaisesRegex(ValueError, "missing=PREPARE"):
+            try:
+                self.capture_synthetic(fixture(("FWD_H", "FWD_O")), directory)
+            finally:
+                metadata = json.loads((directory / "capture_metadata.json").read_text())
+                self.assertEqual(metadata["decode_status"], "failed")
+                self.assertIn("missing=PREPARE", metadata["decode_error"])
+                self.assertEqual(metadata["output_comparison"], "ten outputs exactly match uninstrumented call")
+                self.assertEqual(self.compare.call_count, 10)
+                self.assertEqual(parser.read_raw(directory / "gdn_npu_time_raw.csv"), fixture(("FWD_H", "FWD_O")))
+                self.assertFalse((directory / "gdn_npu_time_parsed.csv").exists())
+
+    def test_output_mismatch_keeps_raw_before_decoding(self):
+        with test_directory() as directory, self.assertRaises(AssertionError):
+            try:
+                self.capture_synthetic(fixture(), directory, mismatch=True)
+            finally:
+                metadata = json.loads((directory / "capture_metadata.json").read_text())
+                self.assertIn("failed; raw retained", metadata["output_comparison"])
+                self.assertEqual(metadata["decode_status"], "pending")
+                self.assertTrue((directory / "gdn_npu_time_raw.csv").is_file())
+
+    def test_unaligned_timer_is_rejected_before_diagnostic_launch(self):
+        with test_directory() as directory, self.assertRaisesRegex(ValueError, "cache-line aligned"):
+            try:
+                self.capture_synthetic(fixture(), directory, address=72)
+            finally:
+                self.profile_launch.assert_not_called()
 
 
 class TimerAbiTest(unittest.TestCase):
