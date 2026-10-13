@@ -895,16 +895,83 @@ for spec in MSS_TEMPLATE_SPECS:
         )
 
 
+def build_paired_lookahead_specs() -> list[dict]:
+    """Exercise the new GVA2 branch at the existing frozen input scales."""
+    specs = []
+    for gate_dtype in TEMPLATE_GATE_DTYPES:
+        for use_exp2 in TEMPLATE_EXP2_VALUES:
+            for state_v_first in TEMPLATE_STATE_LAYOUTS:
+                for initial in (False, True):
+                    for final in (False, True):
+                        specs.append(_positive(
+                            f"paired_{gate_dtype}_{int(use_exp2)}_{int(state_v_first)}_"
+                            f"init{int(initial)}_final{int(final)}",
+                            tags="accuracy,paired_lookahead,bank_reuse,tail1",
+                            HK=16, HV=32, T=193, gate_dtype=gate_dtype,
+                            use_exp2=use_exp2, state_v_first=state_v_first,
+                            state_dtype="fp32" if initial else "none",
+                            output_final_state=final))
+    for tokens in (1, 64):
+        for initial in (False, True):
+            for final in (False, True):
+                specs.append(_positive(
+                    f"paired_t{tokens}_init{int(initial)}_final{int(final)}",
+                    tags="accuracy,paired_lookahead,terminal",
+                    HK=16, HV=32, T=tokens, gate_dtype="fp32",
+                    state_dtype="fp32" if initial else "none", output_final_state=final))
+    for initial in (False, True):
+        specs.append(_positive(
+            f"paired_tail63_init{int(initial)}",
+            tags="accuracy,paired_lookahead,tail63", HK=16, HV=32, T=191,
+            state_dtype="fp32" if initial else "none", output_final_state=initial))
+    for final in (False, True):
+        specs.append(_positive(
+            f"paired_varlen_final{int(final)}",
+            tags="accuracy,paired_lookahead,varlen,explicit_indices",
+            HK=8, HV=16, T=193, seqlens="1,64,128", explicit_chunk_indices=True,
+            gate_dtype="fp32", state_dtype="fp32" if final else "none",
+            output_final_state=final))
+    specs.extend([
+        _positive("paired_dense_unit_transition", tags="accuracy,paired_lookahead,cross_unit",
+                  B=2, HK=40, HV=80, T=65, gate_dtype="fp32", state_dtype="fp32",
+                  output_final_state=True),
+        _positive("paired_varlen_unit_transition", tags="accuracy,paired_lookahead,cross_unit,varlen",
+                  HK=40, HV=80, T=194, seqlens="65,129", state_dtype="fp32",
+                  output_final_state=False, use_exp2=True, state_v_first=True),
+        _positive("paired_case0_length", tags="accuracy,paired_lookahead,long_credit_reuse",
+                  HK=16, HV=32, T=11274, gate_dtype="fp32", state_dtype="fp32",
+                  output_final_state=True),
+        _positive("paired_non_contiguous_u", tags="accuracy,paired_lookahead,non_contiguous_input",
+                  HK=16, HV=32, T=193, gate_dtype="fp32", state_dtype="fp32",
+                  output_final_state=True, use_exp2=True, state_v_first=True, non_contiguous_u=True),
+    ])
+    if len(specs) != 48:
+        raise AssertionError(f"paired lookahead: expected 48 cases, got {len(specs)}")
+    return specs
+
+
 def build_accuracy_specs() -> list[dict]:
     for matrix_name, matrix_specs in ACCURACY_TEMPLATE_MATRIX_GROUPS:
         _assert_complete_template_matrix(f"accuracy/{matrix_name}", matrix_specs)
     specs = deepcopy(POSITIVE_SPECS)
     if len(specs) != 200:
         raise AssertionError(f"accuracy: expected 200 cases, got {len(specs)}")
+    # Append only: existing case IDs, seeds and matrix ranges stay reproducible.
+    specs.extend(build_paired_lookahead_specs())
     _assert_unique_specs("accuracy", specs)
     for case_id, spec in enumerate(specs):
         spec["case_id"] = case_id
         spec.setdefault("seed", SEED_BASE + case_id)
+    # Each new logical accuracy case carries three actual executor seeds.
+    # Keep its first seed and all historical IDs unchanged.
+    paired_first_seed = deepcopy(specs[200:])
+    for repetition in (1, 2):
+        for first in paired_first_seed:
+            spec = deepcopy(first)
+            spec["case_id"] = len(specs)
+            spec["case_key"] += f"_seed{repetition + 1}"
+            spec["seed"] = SEED_BASE + 10000 * repetition + first["case_id"]
+            specs.append(spec)
     return specs
 
 
@@ -923,6 +990,9 @@ def build_mss_specs() -> list[dict]:
     _assert_complete_template_matrix("determinism", MSS_TEMPLATE_SPECS)
     _assert_complete_template_matrix("mss", MSS_TEMPLATE_SPECS)
     specs = deepcopy(MSS_TEMPLATE_SPECS)
+    # Eight reachable FP32-state/scalar-g templates on a complete paired work unit.
+    specs.extend(spec for spec in build_paired_lookahead_specs()[:32]
+                 if spec["state_dtype"] == "fp32" and spec["output_final_state"])
     _assert_unique_specs("determinism/mss", specs)
     for case_id, spec in enumerate(specs):
         spec["case_id"] = case_id

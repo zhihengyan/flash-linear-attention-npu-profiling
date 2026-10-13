@@ -78,31 +78,31 @@ ACLNN launch（host，固定） → stream 同步（采集端，位于性能循�
 | H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch22/chunk_fwd_h_vec.h:759` | `AscendC::CrossCoreWaitFlag<0x2, PIPE_V>(` | AIV | 原 wait 返回；等待窗口 |
 | H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch22/chunk_fwd_h_vec.h:773` | `AscendC::CrossCoreWaitFlag<0x2, PIPE_V>(` | AIV | 原 wait 返回；等待窗口 |
 | H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch22/chunk_fwd_h_vec.h:788` | `AscendC::CrossCoreWaitFlag<0x2, PIPE_V>(FwdHAivLocalFlag(FWD_H_ROUND_ACK_FLAG, 0));` | AIV | 原 wait 返回；等待窗口 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:355` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_MTE2>(` | AIC | 原 wait 返回；等待窗口 |
-| H_WH | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:375` | `const uint32_t m = FwdHAlignCube(chunk.validTokens);` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:417` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:425` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:433` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:525` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_MTE2>(` | AIC | 原 wait 返回；等待窗口 |
-| H_KV | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:563` | `const uint32_t m = FWD_H_K;` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:628` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:636` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:644` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:786` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:792` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:803` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:809` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:819` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_S>(` | AIC | 原 wait 返回；等待窗口 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:824` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_S>(` | AIC | 原 wait 返回；等待窗口 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:360` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_MTE2>(` | AIC | 原 wait 返回；等待窗口 |
+| H_WH | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:381` | `const uint32_t m = FwdHAlignCube(chunk.validTokens);` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:427` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:435` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:443` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:540` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_MTE2>(` | AIC | 原 wait 返回；等待窗口 |
+| H_KV | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:579` | `const uint32_t m = FWD_H_K;` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:648` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:656` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:664` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:873` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:879` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:890` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:896` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(` | AIC | 原 wait 返回；等待窗口 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:906` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_S>(` | AIC | 原 wait 返回；等待窗口 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_cube.h:911` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_S>(` | AIC | 原 wait 返回；等待窗口 |
 | H_VNEW | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_vec.h:647` | `const uint32_t slot = DataSlot(head);` | AIV | NoBarrier 调用/下发窗口；原同步保留 |
 | H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_vec.h:673` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(` | AIV | 原 wait 返回；等待窗口 |
 | H_STATE_UPDATE | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_vec.h:873` | `static_assert(!RESIDENT_FP32_STATE // CompilePolicy::STATE_FP32,` | AIV | NoBarrier 调用/下发窗口；原同步保留 |
 | H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_vec.h:879` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(` | AIV | 原 wait 返回；等待窗口 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_vec.h:1143` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(` | AIV | 原 wait 返回；等待窗口 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_vec.h:1180` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(` | AIV | 原 wait 返回；等待窗口 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_vec.h:1200` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(` | AIV | 原 wait 返回；等待窗口 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_vec.h:1217` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(` | AIV | 原 wait 返回；等待窗口 |
-| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_vec.h:1233` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_S>(FwdHAivLocalFlag(FWD_H_ROUND_ACK_FLAG, 0));` | AIV | 原 wait 返回；等待窗口 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_vec.h:1144` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(` | AIV | 原 wait 返回；等待窗口 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_vec.h:1185` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(` | AIV | 原 wait 返回；等待窗口 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_vec.h:1205` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(` | AIV | 原 wait 返回；等待窗口 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_vec.h:1222` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(` | AIV | 原 wait 返回；等待窗口 |
+| H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_vec.h:1238` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_S>(FwdHAivLocalFlag(FWD_H_ROUND_ACK_FLAG, 0));` | AIV | 原 wait 返回；等待窗口 |
 | O_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:170` | `Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);` | AIC | 原 wait 返回；等待窗口 |
 | O_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:182` | `Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);` | AIC | 原 wait 返回；等待窗口 |
 | O_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:195` | `Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);` | AIC | 原 wait 返回；等待窗口 |

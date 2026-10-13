@@ -44,6 +44,19 @@ python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --dev
 
 原始数据留在内部环境时，使用 tests/ut/summarize_timer.py 生成小型 brief.txt 及阶段/逐核汇总，首轮只需粘贴摘要。命令、指标含义与分析顺序见 [timer_analysis.md](timer_analysis.md)。
 
+### 归档 A/B wheel 使用同一入口
+
+分别从准确的 A/B 源码完整构建并归档 wheel，然后依次安装，使用同一份本分支入口运行。将当前安装对应的准确 wheel 绝对路径传给 `--reference-wheel`；入口对照归档 wheel 的全部 runtime/OPP 文件，包括 kernel object、config、Python wrapper 和 opapi 的 SHA，记录 wheel SHA 到 run_metadata.json。在该模式下不拿当前 checkout 的 B staging 校验已安装的 A。`source_commit` 表示运行脚本所在 checkout，实际 A/B 身份以 wheel 校验和构建记录为准。
+
+```bash
+python -m pip install --force-reinstall --no-cache-dir --no-deps "$B_WHEEL"
+python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py \
+  --device 0 --cases 0 --reference-wheel "$B_WHEEL" \
+  --output-dir "$PWD/tests/atk/chunk_gated_delta_rule_fwd/atk_output/h_lookahead_B1"
+```
+
+安装 A 后相应使用 `--reference-wheel "$A_WHEEL"` 和新的 A 结果目录。每轮主入口内部先跑普通 msprof performance_device，再做 timer 诊断，无需额外采集步骤。H 双 head 候选的精度前置、交错测量和 ≥5% 门槛见 [H 验证记录](../../chunk_fwd_h/docs/validation.md)。
+
 成功标志是原性能用例确实执行、十项普通/诊断输出一致、实际路由所有 launch 有有效 header 与每核总窗口、CSV 严格校验完成，并最终打印 `Profiling complete:`。空 raw、缺 kernel、缺配对、负 duration、越界等会报失败且保留 raw/日志，不能只根据子进程 exit 0 宣告设备成功。
 
 核实 GetSystemCycle 频率和 AIC/AIV 共同时钟后，可在同一主入口追加 `--cycles-per-us 实际频率 --shared-clock`，生成 gdn_npu_time.json，使用 [Perfetto](https://ui.perfetto.dev/) 加载。默认只输出 cycles，不猜频率；各 kernel 独立原点，窗口可重叠。

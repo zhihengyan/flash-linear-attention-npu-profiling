@@ -39,16 +39,37 @@ YAML 元信息覆盖 `ascend910b`、`ascend910_93` 和 `ascend950`，可配合�
 
 | 文件 | 用例数 | 用途 | 关键覆盖 |
 | --- | ---: | --- | --- |
-| `atk_chunk_fwd_h.json` | 200 | 精度 | 40 条功能/边界专项 + 5 组完整 32 项模板矩阵 |
+| `atk_chunk_fwd_h.json` | 344 | 精度 | 原 200 条 + 双 head lookahead 的 48 个逻辑场景各 3 个固定种子 |
 | `atk_chunk_fwd_h_perf.json` | 44 | 性能 | 12 条模型/专项场景 + 32 项模板矩阵 |
-| `atk_chunk_fwd_h_mss.json` | 32 | 确定性与内存检测 | 每个顶层模板实例一条 |
+| `atk_chunk_fwd_h_mss.json` | 40 | 确定性与内存检测 | 原 32 项模板 + 8 项双 head FP32 state/scalar-g 模板 |
 
 精度矩阵的 case 0-39 覆盖最小输入、分核、g/gk、state 生命周期、tail、变长和非连续 view；
 case 40-71、72-103、104-135、136-167、168-199 分别覆盖 dense tail=1、整 chunk、
 dense tail=63、terminal no-final 和 varlen explicit-index 的完整模板矩阵。性能矩阵包含
 `B=2,HK=16,HV=32,T=11264` 目标场景、对应 B=1/initial-state 对照、完整模板矩阵和变长/模型
 shape。`atk_chunk_fwd_h_mss.json` 同时供 determinism 与 mssanitizer scope 使用，默认均执行
-完整 32 项模板矩阵。
+完整 32 项模板矩阵及新增 8 条双 head 场景。原有用例、seed 和标准保持；新增场景的设备精度、值域区分能力及正式验收待执行。
+
+### A5 双 head lookahead 覆盖
+
+新增精度 case 200–247 为第一组种子，248–295、296–343 分别为相同逻辑场景的第二、第三组固定种子。初态/终态四组合按 none/no-final、none/final、FP32/no-final、FP32/final 排列。实际调用选中分支需同时满足 A5、FP32 state、scalar-g、两个有效 head 共用一个 K、HV=2HK；下表按可用 28 AIC 推导任务范围，设备实际 key/blockDim/分支证据尚未取得。
+
+| 选择条件 / 场景 | 第一组精度 case | 第二/第三组 | determinism / MSS | 实际选择证据 |
+| --- | --- | --- | --- | --- |
+| BF16 gate / exp / KV，四初态终态组合 | 200–203 | 相应 ID+48 / +96 | 32 | 未验证 |
+| BF16 gate / exp / VK | 204–207 | 同上 | 33 | 未验证 |
+| BF16 gate / exp2 / KV | 208–211 | 同上 | 34 | 未验证 |
+| BF16 gate / exp2 / VK | 212–215 | 同上 | 35 | 未验证 |
+| FP32 gate / exp / KV | 216–219 | 同上 | 36 | 未验证 |
+| FP32 gate / exp / VK | 220–223 | 同上 | 37 | 未验证 |
+| FP32 gate / exp2 / KV | 224–227 | 同上 | 38 | 未验证 |
+| FP32 gate / exp2 / VK | 228–231 | 同上 | 39 | 未验证 |
+| T1/T64，全部初态终态组合 | 232–239 | 同上 | 上述八模板 | 未验证；无初态无终态单块 AIC 无工作 |
+| tail63，varlen（1/64/128 tokens） | 240–243 | 同上 | 上述八模板 | 未验证 |
+| 旧四 head 与新 pair 跨 unit 切换、变长 | 244–245 | 同上 | 上述八模板 | 未验证 |
+| GDN case0 的 177 chunks / tail10、非连续 U | 246–247 | 同上 | 上述八模板 | 未验证 |
+
+性能模型映射保留：原 performance 4/6 对应 B1/HK16/HV32/T11264 的无初态/FP32 初态目标；GDN case0 的完整链路性能仍由 GDN performance case0 测量，H accuracy 246 仅覆盖相同长度与 head ratio，输入来自本工程标杆，不是 GDN 的原始性能输入。运行前的开发检查和设备待办见 [H 验证记录](../../../fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/docs/validation.md)。
 
 ### TilingKey 覆盖
 

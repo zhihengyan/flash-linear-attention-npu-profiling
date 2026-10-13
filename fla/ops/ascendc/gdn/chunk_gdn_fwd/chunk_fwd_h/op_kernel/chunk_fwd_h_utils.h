@@ -144,6 +144,16 @@ __aicore__ inline FwdHHeadRoundPlan FwdHBuildHeadRound(const FwdHRuntimeTiling &
     return FwdHBuildHeadRange<GATE_MODE>(tiling, hvBegin, activeHeadCount);
 }
 
+// Keep the first paired-head lookahead candidate on a complete GVA2 group.
+// Both cores must select the same path before queuing any input-bank credits.
+__aicore__ inline bool FwdHUsePairedHeadLookahead(const FwdHRuntimeTiling &tiling,
+                                               const FwdHHeadRoundPlan &plan)
+{
+    return plan.activeHeadCount == 2 && plan.requiredKhCount == 1 &&
+        static_cast<uint64_t>(tiling.vNumHead) == 2ULL * tiling.kNumHead &&
+        plan.heads[0].kh == plan.heads[1].kh;
+}
+
 __aicore__ inline FwdHKgBinding FwdHBuildKgBinding(const FwdHHeadRoundPlan &plan,
                                                    uint32_t kgSlot)
 {

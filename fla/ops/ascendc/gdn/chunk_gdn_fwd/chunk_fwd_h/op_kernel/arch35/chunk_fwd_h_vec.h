@@ -1117,7 +1117,8 @@ private:
 
     __aicore__ inline void ProcessSingleHeadPipeline(const FwdHWorkUnit &unit)
     {
-        // activeHeadCount==1 时只有 AIV0 持有 head。U/g 使用 chunk 奇偶 bank，
+        // A single head uses AIV0; a complete GVA2 pair gives one head to each AIV.
+        // U/g 使用 chunk 奇偶 bank，
         // 下一 chunk 的 MTE2 在当前 Stage1/Stage3 前发射；P/D/right/state 仍使用
         // 逻辑 localSlot0，并保持原有跨核 ready/free 协议。
         const uint32_t localHeads = FwdHAivHeadCount(unit.headRound.activeHeadCount, aiv_);
@@ -1168,6 +1169,10 @@ private:
         if constexpr (CompilePolicy::STATE_FP32 &&
                       CompilePolicy::GATE_MODE == FwdHGateMode::SCALAR_G) {
             if (unit.headRound.activeHeadCount == 1) {
+                ProcessSingleHeadPipeline(unit);
+            } else if (FwdHUsePairedHeadLookahead(args_.tiling, unit.headRound)) {
+                // Each AIV has exactly one local head, so reuse its existing input-bank
+                // pipeline with its own head binding and unchanged cross-core credits.
                 ProcessSingleHeadPipeline(unit);
             } else {
                 for (uint32_t chunkId = 0; chunkId < unit.sequence.chunkCount; ++chunkId) {

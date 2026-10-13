@@ -318,12 +318,15 @@ private:
     }
 
     // 保留 leaf stage 调用边界，使 TLA 临时对象在各 head/stage 之间复用标量栈区。
+    template <bool MANAGE_INPUT_EVENTS = true>
     __aicore__ inline void LoadStage0W(
         const FwdHWorkUnit &unit, const FwdHChunkSpan &chunk, const FwdHHeadBinding &head,
         uint32_t wSlot)
     {
         // W 与递推 H 使用独立 L1/event 槽；W 可在 H_READY 到达前跨 chunk 预取。
-        AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(WReadyEvent(wSlot));
+        if constexpr (MANAGE_INPUT_EVENTS) {
+            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(WReadyEvent(wSlot));
+        }
         AscendC::GlobalTensor<bfloat16_t> gmW;
         gmW.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args_.w) + WOffset(unit, chunk, head));
         gmW.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
@@ -337,7 +340,9 @@ private:
         auto tensorL1W = tla::MakeTensor(L1W(wSlot), L1_W_LAYOUT, Catlass::Arch::PositionL1{});
         CopyGmToL1AS0<decltype(blockW)> copyW;
         copyW(tensorL1W, blockW);
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(WDoneEvent(wSlot));
+        if constexpr (MANAGE_INPUT_EVENTS) {
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(WDoneEvent(wSlot));
+        }
     }
 
     __aicore__ inline void LoadStage0H(
@@ -368,6 +373,7 @@ private:
         AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(HRightDoneEvent(hSlot));
     }
 
+    template <bool MANAGE_INPUT_EVENTS = true>
     __aicore__ inline void ComputeStage0Head(
         const FwdHWorkUnit &unit, const FwdHChunkSpan &chunk, const FwdHHeadBinding &head,
         uint32_t pipelineSlot, uint32_t wSlot, uint32_t hSlot)
@@ -385,7 +391,9 @@ private:
             auto tensorL0B = tla::MakeTensor(L0B(pipelineSlot), layoutL0B, Catlass::Arch::PositionL0B{});
             auto tensorL0C = tla::MakeTensor(L0C(pipelineSlot), layoutL0C, Catlass::Arch::PositionL0C{});
 
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(WDoneEvent(wSlot));
+            if constexpr (MANAGE_INPUT_EVENTS) {
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(WDoneEvent(wSlot));
+            }
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(HRightDoneEvent(hSlot));
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(L0AFreeEvent(pipelineSlot));
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(L0BFreeEvent(pipelineSlot));
@@ -394,7 +402,9 @@ private:
             copyA(tensorL0A, tla::GetTile(tensorL1W, tla::MakeCoord(0, 0), tla::MakeShape(m, FWD_H_K)));
             copyB(tensorL0B, tla::GetTile(tensorL1H, tla::MakeCoord(0, 0),
                                          tla::MakeShape(FWD_H_K, FWD_H_V)));
-            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(WReadyEvent(wSlot));
+            if constexpr (MANAGE_INPUT_EVENTS) {
+                AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(WReadyEvent(wSlot));
+            }
             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(HRightReadyEvent(hSlot));
             AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(L0AReadyEvent(pipelineSlot));
             AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(L0BReadyEvent(pipelineSlot));
@@ -470,12 +480,15 @@ private:
         }
     }
 
+    template <bool MANAGE_INPUT_EVENTS = true>
     __aicore__ inline void LoadKg(
         const FwdHWorkUnit &unit, const FwdHChunkSpan &chunk, const FwdHKgBinding &binding)
     {
         // Stage2 搬运：只加载本轮 requiredKh[] 中实际存在的 k_raw/kg；slot 不跨 round 保留。
         const uint32_t slot = binding.slot;
-        AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(WReadyEvent(slot));
+        if constexpr (MANAGE_INPUT_EVENTS) {
+            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(WReadyEvent(slot));
+        }
         if (chunk.validTokens < FWD_H_CHUNK) {
             ClearL1(L1Kg(slot), FWD_H_L1_KG_SLOT_BYTES);
         }
@@ -514,7 +527,9 @@ private:
             CopyGmToL1BS2<decltype(blockGm)> copy;
             copy(tensorL1, blockGm);
         }
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(WDoneEvent(slot));
+        if constexpr (MANAGE_INPUT_EVENTS) {
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(WDoneEvent(slot));
+        }
     }
 
     __aicore__ inline void LoadRight(
@@ -556,6 +571,7 @@ private:
         AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(HRightDoneEvent(hSlot));
     }
 
+    template <bool MANAGE_INPUT_EVENTS = true>
     __aicore__ inline void ComputeStage2Head(
         const FwdHWorkUnit &unit, const FwdHChunkSpan &chunk, const FwdHHeadBinding &head,
         const FwdHKgBinding &binding, uint32_t hSlot, uint32_t pipelineSlot, bool stage0Ran)
@@ -574,8 +590,10 @@ private:
 
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(L0AFreeEvent(pipelineSlot));
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(L0BFreeEvent(pipelineSlot));
-            if (head.roundHead == binding.firstConsumer) {
-                AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(WDoneEvent(binding.slot));
+            if constexpr (MANAGE_INPUT_EVENTS) {
+                if (head.roundHead == binding.firstConsumer) {
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(WDoneEvent(binding.slot));
+                }
             }
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(HRightDoneEvent(hSlot));
             CopyL1ToL0AS2 copyA;
@@ -601,8 +619,10 @@ private:
                 copyB(tensorL0B, tla::GetTile(tensorRight, tla::MakeCoord(0, 0),
                                               tla::MakeShape(k, FWD_H_V)));
             }
-            if (head.roundHead == binding.lastConsumer) {
-                AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(WReadyEvent(binding.slot));
+            if constexpr (MANAGE_INPUT_EVENTS) {
+                if (head.roundHead == binding.lastConsumer) {
+                    AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(WReadyEvent(binding.slot));
+                }
             }
             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(HRightReadyEvent(hSlot));
             AscendC::CrossCoreSetFlag<0x4, PIPE_MTE1>(
@@ -735,6 +755,71 @@ private:
         }
     }
 
+    __aicore__ inline FwdHKgBinding BuildPairedHeadKgBinding(
+        const FwdHWorkUnit &unit, uint32_t parity) const
+    {
+        return FwdHKgBinding{unit.headRound.heads[0].kh,
+                            static_cast<uint8_t>(parity), 0, 1, 0};
+    }
+
+    __aicore__ inline void PrefetchPairedHeadInputs(
+        const FwdHWorkUnit &unit, const FwdHChunkSpan &chunk, uint32_t parity)
+    {
+        // Two W tiles and their shared K own one MTE1->MTE2 credit together.
+        // This leaves H/right on IDs 4/5 and never uses reserved IDs 6/7.
+        AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(WReadyEvent(parity));
+        if (!(chunk.first && args_.tiling.useInitialState == 0)) {
+            for (uint32_t r = 0; r < 2; ++r) {
+                LoadStage0W<false>(unit, chunk, unit.headRound.heads[r], 2 * parity + r);
+            }
+        }
+        if (NeedsStage2(chunk)) {
+            LoadKg<false>(unit, chunk, BuildPairedHeadKgBinding(unit, parity));
+        }
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(WDoneEvent(parity));
+    }
+
+    __aicore__ inline void ProcessPairedHeadPipeline(const FwdHWorkUnit &unit)
+    {
+        PrefetchPairedHeadInputs(unit, FwdHBuildChunk(unit.sequence, 0), 0);
+        for (uint32_t chunkId = 0; chunkId < unit.sequence.chunkCount; ++chunkId) {
+            const FwdHChunkSpan chunk = FwdHBuildChunk(unit.sequence, chunkId);
+            const uint32_t parity = chunkId & 1U;
+            const bool stage0Ran = !(chunk.first && args_.tiling.useInitialState == 0);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(WDoneEvent(parity));
+            if (stage0Ran) {
+                // H is a recurrence input: only W/K move across the chunk boundary.
+                for (uint32_t r = 0; r < 2; ++r) {
+                    LoadStage0H(unit, chunk, unit.headRound.heads[r], r);
+                    if (r > 0) {
+                        ComputeStage0Head<false>(unit, chunk, unit.headRound.heads[r - 1],
+                                                r - 1, 2 * parity + r - 1, r - 1);
+                    }
+                }
+                ComputeStage0Head<false>(unit, chunk, unit.headRound.heads[1],
+                                        1, 2 * parity + 1, 1);
+            }
+            if (NeedsStage2(chunk)) {
+                for (uint32_t r = 0; r < 2; ++r) {
+                    LoadRight(chunk, unit.headRound.heads[r], r);
+                }
+                // Current right must reach the MTE2 queue before next-chunk input.
+                if (!chunk.last) {
+                    PrefetchPairedHeadInputs(unit, FwdHBuildChunk(unit.sequence, chunkId + 1),
+                                             parity ^ 1U);
+                }
+                const FwdHKgBinding binding = BuildPairedHeadKgBinding(unit, parity);
+                for (uint32_t r = 0; r < 2; ++r) {
+                    ComputeStage2Head<false>(unit, chunk, unit.headRound.heads[r],
+                                            binding, r, r, stage0Ran);
+                }
+            }
+            // Last shared-K consumer has finished; last no-final instead ends at WH.
+            // Return the joint credit in both cases so kernel/unit draining stays balanced.
+            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(WReadyEvent(parity));
+        }
+    }
+
     __aicore__ inline void ProcessWorkUnit(const FwdHWorkUnit &unit, bool hasNextWorkUnit)
     {
         if (!hasCubeWork_) {
@@ -744,6 +829,8 @@ private:
                       CompilePolicy::GATE_MODE == FwdHGateMode::SCALAR_G) {
             if (unit.headRound.activeHeadCount == 1) {
                 ProcessSingleHeadPipeline(unit);
+            } else if (FwdHUsePairedHeadLookahead(args_.tiling, unit.headRound)) {
+                ProcessPairedHeadPipeline(unit);
             } else {
                 for (uint32_t chunkId = 0; chunkId < unit.sequence.chunkCount; ++chunkId) {
                     const FwdHChunkSpan chunk = FwdHBuildChunk(unit.sequence, chunkId);
