@@ -23,3 +23,7 @@
 当前 Windows 环境只发现 Python，未发现 Docker、CANN/NPU 编译器、npu-smi 或 C++ 编译器。本轮未进行 CANN 构建、安装、符号真实加载、A2/A3/A5 模板选择、设备核映射/GM 发布、精度/确定性/内存验收、Example/ST、ENABLE_TIMER=0 编译 A/B 或真实 raw/CSV/trace 采集。没有阶段耗时或性能提升结论。
 
 阶段 05 的设备验收尚未完成；源码离线通过不能写成算子正式验收通过。诊断打点、末尾局部 drain 和 GM 发布有开销；需按 timer_run 的原 case 做设备对照。动态 iter 是每阶段的调用序号，不能将不同阶段相同 iter 自动视为同一 task，超过采样容量的后续调用没有时间戳。
+
+## 2026-10-13 内部分析工具
+
+新增 summarize_timer.py：直接从原 parsed.csv、timer_layout.json 和可选 capture_metadata.json 生成 brief.txt、summary.json、逐阶段/逐核表及长窗口表。等待比例采用本核等待窗口并集，不重复相加；实际次数与已采样次数分开记录，不外推截断样本。11 项小型合成数据测试通过，覆盖重叠等待、大整数 offset、截断、缺核/缺样本/重复/越界/不一致计数、未知验证状态及 CLI 产物/保留现有结果。未改 kernel、host 或采集输入；未使用真实设备数据，不能据此给出阶段耗时结论。操作和解释见 [timer_analysis.md](timer_analysis.md)。

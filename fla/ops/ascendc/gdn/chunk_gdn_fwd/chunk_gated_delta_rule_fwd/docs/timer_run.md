@@ -42,6 +42,8 @@ python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --dev
 
 默认结果在 `tests/atk/chunk_gated_delta_rule_fwd/atk_output/gdn_timer_<时间戳>_<随机标识>/`（仓库已忽略 atk_output）。也可用 `--output-dir` 指定一个尚不存在的目录。查看 run_metadata.json 的 status、原性能报告及实际成功用例，再看 timer/case_N 的 capture_metadata.json、timer_layout.json、gdn_npu_time_parsed.csv。采样 actual/sampled/truncated 字段给出每核每阶段计数；出现截断只能分析前 32 个调用。
 
+原始数据留在内部环境时，使用 tests/ut/summarize_timer.py 生成小型 brief.txt 及阶段/逐核汇总，首轮只需粘贴摘要。命令、指标含义与分析顺序见 [timer_analysis.md](timer_analysis.md)。
+
 成功标志是原性能用例确实执行、十项普通/诊断输出一致、实际路由所有 launch 有有效 header 与每核总窗口、CSV 严格校验完成，并最终打印 `Profiling complete:`。空 raw、缺 kernel、缺配对、负 duration、越界等会报失败且保留 raw/日志，不能只根据子进程 exit 0 宣告设备成功。
 
 核实 GetSystemCycle 频率和 AIC/AIV 共同时钟后，可在同一主入口追加 `--cycles-per-us 实际频率 --shared-clock`，生成 gdn_npu_time.json，使用 [Perfetto](https://ui.perfetto.dev/) 加载。默认只输出 cycles，不猜频率；各 kernel 独立原点，窗口可重叠。
