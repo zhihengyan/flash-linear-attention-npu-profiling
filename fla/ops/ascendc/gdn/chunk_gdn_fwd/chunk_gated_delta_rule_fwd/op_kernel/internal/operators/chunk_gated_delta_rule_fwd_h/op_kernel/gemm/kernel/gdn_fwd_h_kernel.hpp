@@ -1,3 +1,4 @@
+#include "kernel_utils/gdn_timer/AscendTimerV2_device.hpp"
 /**
  * Copyright (c) 2026 Tianjin University, Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
@@ -67,6 +68,8 @@ template<
 >
 class GDNFwdHKernel {
 public:
+    __aicore__ inline void SetTimerPtr(GdnKernelTimer *timer) { timer_ = timer; }
+
 
     static constexpr uint32_t HO_PIPELINE_CHUNK_SIZE = 64;
     static constexpr uint32_t HO_PIPELINE_VALUE_HEADS = 8;
@@ -351,6 +354,7 @@ public:
 
     __aicore__ inline void ComputeTailVWorkspace(const GDNFwdHOffsets& offsets)
     {
+        GDN_TIMER_SCOPE(timer_, H_WH);
         uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
         uint32_t subBlockNum = AscendC::GetSubBlockNum();
         uint32_t rowsPerSubBlock = CeilDiv(offsets.blockTokens, subBlockNum);
@@ -402,6 +406,7 @@ public:
 
     __aicore__ inline void ComputeTailHWorkspace(const GDNFwdHOffsets& offsets)
     {
+        GDN_TIMER_SCOPE(timer_, H_KV);
         uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
         uint32_t subBlockNum = AscendC::GetSubBlockNum();
         uint32_t rowsPerSubBlock = CeilDiv(kHeadDim, subBlockNum);
@@ -564,14 +569,20 @@ public:
                         auto tensorBlockV = GetTile(tensorV, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.m(), cube1Shape.n()));
                         if (cube1Offsets.blockTokens < chunkSize) {
                             blockMmadWHTail.preSetFlags();
-                            blockMmadWHTail(
-                                tensorBlockW, tensorBlockH, tensorBlockV,
-                                cube1Shape, EmptyClass{}, true);
+                            {
+                                GDN_TIMER_SCOPE(timer_, H_WH);
+                                blockMmadWHTail(
+                                    tensorBlockW, tensorBlockH, tensorBlockV,
+                                    cube1Shape, EmptyClass{}, true);
+                            }
                             blockMmadWHTail.finalWaitFlags();
                         } else {
                             blockMmadWH.preSetFlags();
-                            blockMmadWH(
-                                tensorBlockW, tensorBlockH, tensorBlockV, cube1Shape);
+                            {
+                                GDN_TIMER_SCOPE(timer_, H_WH);
+                                blockMmadWH(
+                                    tensorBlockW, tensorBlockH, tensorBlockV, cube1Shape);
+                            }
                             blockMmadWH.finalWaitFlags();
                         }
                         AscendC::PipeBarrier<PIPE_ALL>();
@@ -609,15 +620,21 @@ public:
                             auto tensorBlockHwork = GetTile(tensorHwork, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.n()));
                             if (cube2Offsets.blockTokens < chunkSize) {
                                 blockMmadKVTail.preSetFlags();
-                                blockMmadKVTail(
-                                    tensorBlockK, tensorBlockVwork, tensorBlockHwork,
-                                    cube2Shape, EmptyClass{}, true);
+                                {
+                                    GDN_TIMER_SCOPE(timer_, H_KV);
+                                    blockMmadKVTail(
+                                        tensorBlockK, tensorBlockVwork, tensorBlockHwork,
+                                        cube2Shape, EmptyClass{}, true);
+                                }
                                 blockMmadKVTail.finalWaitFlags();
                             } else {
                                 blockMmadKV.preSetFlags();
-                                blockMmadKV(
-                                    tensorBlockK, tensorBlockVwork, tensorBlockHwork,
-                                    cube2Shape);
+                                {
+                                    GDN_TIMER_SCOPE(timer_, H_KV);
+                                    blockMmadKV(
+                                        tensorBlockK, tensorBlockVwork, tensorBlockHwork,
+                                        cube2Shape);
+                                }
                                 blockMmadKV.finalWaitFlags();
                             }
                             AscendC::PipeBarrier<PIPE_ALL>();
@@ -756,15 +773,18 @@ public:
                         }
                         bool waitWsFromMte3 = storeFinalState && std::is_same<ElementFinalState, float>::value &&
                                               event0FromMte3[streamId];
-                        epilogueGDNFwdHVnew(
-                            gmV[vec1Offsets.uvOffset], gmVUpdateWorkspace[vec1Offsets.vWorkOffset],
-                            gmG[vec1Offsets.gOffset], gmU[vec1Offsets.uvOffset], gmVWorkspace[vec1Offsets.vWorkOffset],
-                            gmGk[vec1Offsets.gkOffset], gmK[vec1Offsets.wkOffset], gmKDecayWorkspace[vec1Offsets.kDecayWorkOffset],
-                            vec1Offsets.blockTokens, kHeadDim, vec1Offsets.vBlockDim, vHeadDim,
-                            vecBlockScheduler.cube1Done[streamId], vecBlockScheduler.vec1Done[streamId],
-                            vec1Offsets.isInitialState, vec1Offsets.isFinalState, storeFinalState,
-                            waitWsFromMte3, (streamId == 0)
-                        );
+                        {
+                            GDN_TIMER_SCOPE(timer_, H_VNEW);
+                            epilogueGDNFwdHVnew(
+                                gmV[vec1Offsets.uvOffset], gmVUpdateWorkspace[vec1Offsets.vWorkOffset],
+                                gmG[vec1Offsets.gOffset], gmU[vec1Offsets.uvOffset], gmVWorkspace[vec1Offsets.vWorkOffset],
+                                gmGk[vec1Offsets.gkOffset], gmK[vec1Offsets.wkOffset], gmKDecayWorkspace[vec1Offsets.kDecayWorkOffset],
+                                vec1Offsets.blockTokens, kHeadDim, vec1Offsets.vBlockDim, vHeadDim,
+                                vecBlockScheduler.cube1Done[streamId], vecBlockScheduler.vec1Done[streamId],
+                                vec1Offsets.isInitialState, vec1Offsets.isFinalState, storeFinalState,
+                                waitWsFromMte3, (streamId == 0)
+                            );
+                        }
                         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                         SignalChunkReady(vec1Offsets);
@@ -793,17 +813,20 @@ public:
                                 event2FromMte3[streamId] = !vec2Offsets.isFinalState;
                             }
                             // step 4:  h[i+1] += h_work if i < num_chunks - 1 else None
-                            epilogueGDNFwdHUpdate(
-                                gmH[vec2Offsets.hDstOffset], gmFinalState[vec2Offsets.finalStateOffset],
-                                gmG[vec2Offsets.gOffset],
-                                gmH[vec2Offsets.hSrcOffset],
-                                gmHWorkspace[vec2Offsets.hWorkOffset],
-                                gmGk[vec2Offsets.gkOffset],
-                                gmInitialState[vec2Offsets.initialStateOffset],
-                                vec2Offsets.blockTokens, kHeadDim, vec2Offsets.vBlockDim, vHeadDim, vecBlockScheduler.cube2Done[streamId],
-                                vec2Offsets.isInitialState, vec2Offsets.isFinalState, storeFinalState,
-                                useInitialState, (streamId == 0), tailVectorPath
-                            );
+                            {
+                                GDN_TIMER_SCOPE(timer_, H_STATE_UPDATE);
+                                epilogueGDNFwdHUpdate(
+                                    gmH[vec2Offsets.hDstOffset], gmFinalState[vec2Offsets.finalStateOffset],
+                                    gmG[vec2Offsets.gOffset],
+                                    gmH[vec2Offsets.hSrcOffset],
+                                    gmHWorkspace[vec2Offsets.hWorkOffset],
+                                    gmGk[vec2Offsets.gkOffset],
+                                    gmInitialState[vec2Offsets.initialStateOffset],
+                                    vec2Offsets.blockTokens, kHeadDim, vec2Offsets.vBlockDim, vHeadDim, vecBlockScheduler.cube2Done[streamId],
+                                    vec2Offsets.isInitialState, vec2Offsets.isFinalState, storeFinalState,
+                                    useInitialState, (streamId == 0), tailVectorPath
+                                );
+                            }
                             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                         } else {
@@ -833,6 +856,9 @@ public:
         }
     }
 
+
+private:
+    GdnKernelTimer *timer_ = nullptr;
 };
 
 }

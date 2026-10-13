@@ -17,6 +17,7 @@
 #define CHUNK_FWD_O_ARCH35_A5_H
 
 #include "kernel_operator.h"
+#include "kernel_utils/gdn_timer/AscendTimerV2_device.hpp"
 #include "../chunk_fwd_o_struct.h"
 #include "chunk_fwd_o_common.h"
 #include "chunk_fwd_o_cube.h"
@@ -43,7 +44,7 @@ public:
         tiling_ = *tilingData;
     }
 
-    __aicore__ inline void Process()
+    __aicore__ inline void Process(GdnKernelTimer &timer)
     {
         const uint32_t aicCoreIdx = AscendC::GetBlockIdx();
         const uint32_t aicCoreNum = AscendC::GetBlockNum();
@@ -55,6 +56,8 @@ public:
             ChunkFwdOA5VectorProcess<GT, UseExp2> vector(q_, k_, v_, h_, g_, cuSeqlens_, chunkOffsets_, o_,
                                                        workspace_);
             vector.Init(tiling_, &pipe);
+            TIMER_BLOCK(timer.InitDone());
+            TIMER_BLOCK(vector.SetTimerPtr(&timer));
             vector.Process(aivCoreIdx, aivCoreNum);
             return;
         }
@@ -62,6 +65,8 @@ public:
         if ASCEND_IS_AIC {
             ChunkFwdOA5CubeProcess cube(q_, k_, v_, h_, g_, cuSeqlens_, chunkOffsets_, o_, workspace_);
             cube.Init(tiling_);
+            TIMER_BLOCK(timer.InitDone());
+            TIMER_BLOCK(cube.SetTimerPtr(&timer));
             cube.Process(aicCoreIdx, aicCoreNum);
         }
     }
@@ -82,11 +87,11 @@ private:
 template <typename GT, bool UseExp2>
 __aicore__ inline void ChunkFwdOA5Dispatch(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR h, GM_ADDR g,
                                            GM_ADDR cuSeqlens, GM_ADDR chunkOffsets, GM_ADDR o, GM_ADDR workspace,
-                                           const ChunkFwdOTilingData *tilingData)
+                                           const ChunkFwdOTilingData *tilingData, GdnKernelTimer &timer)
 {
     ChunkFwdOA5<GT, UseExp2> op;
     op.Init(q, k, v, h, g, cuSeqlens, chunkOffsets, o, workspace, tilingData);
-    op.Process();
+    op.Process(timer);
 }
 
 } // namespace GDN

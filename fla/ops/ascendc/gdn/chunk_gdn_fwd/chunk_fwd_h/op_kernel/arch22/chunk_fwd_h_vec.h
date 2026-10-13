@@ -1,3 +1,4 @@
+#include "kernel_utils/gdn_timer/AscendTimerV2_device.hpp"
 /**
  * Copyright (c) 2026 Tianjin University, Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
@@ -19,6 +20,8 @@ constexpr float FWD_H_ARCH22_LN2 = 0.69314718055994530942f;
 template <typename GateT, typename CompilePolicy, bool STATE_V_FIRST>
 class ChunkFwdHVecArch22 {
 public:
+    __aicore__ inline void SetTimerPtr(GdnKernelTimer *timer) { timer_ = timer; }
+
     __aicore__ inline void Init(const FwdHKernelArgs &args)
     {
         args_ = args;
@@ -348,59 +351,60 @@ private:
                                              const FwdHHeadBinding &head,
                                              uint32_t row)
     {
-        const uint32_t slot = head.localSlot;
-        const uint32_t rows = TileRows(chunk.validTokens - row);
-        const uint32_t elements = rows * FWD_H_V;
-        if constexpr (WAIT_READY) {
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(IoReadyEvent(slot));
-        }
-        AscendC::Cast(calc_[slot], io_[slot], AscendC::RoundMode::CAST_NONE, elements);
-        AscendC::PipeBarrier<PIPE_V>();
-        if constexpr (HAS_P) {
-            if constexpr (std::is_same<PType, float>::value) {
-                AscendC::Sub(calc_[slot], calc_[slot], raw_[slot].template ReinterpretCast<float>(), elements);
-            } else {
-                AscendC::Cast(cast_[slot], raw_[slot].template ReinterpretCast<bfloat16_t>(),
-                              AscendC::RoundMode::CAST_NONE, elements);
-                AscendC::PipeBarrier<PIPE_V>();
-                AscendC::Sub(calc_[slot], calc_[slot], cast_[slot], elements);
+        GDN_TIMER_SCOPE(timer_, H_VNEW);
+            const uint32_t slot = head.localSlot;
+            const uint32_t rows = TileRows(chunk.validTokens - row);
+            const uint32_t elements = rows * FWD_H_V;
+            if constexpr (WAIT_READY) {
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(IoReadyEvent(slot));
             }
-        }
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Cast(io_[slot], calc_[slot], AscendC::RoundMode::CAST_RINT, elements);
-        if constexpr (WRITE_RIGHT) {
-            if constexpr (CompilePolicy::GATE_MODE == FwdHGateMode::SCALAR_G) {
-                uint32_t dstShape[2] = {rows, FWD_H_V};
-                uint32_t srcShape[2] = {rows, 1};
-                AscendC::Broadcast<float, 2, 1>(
-                    raw_[slot].template ReinterpretCast<float>(), gateFp32_[slot][row],
-                    dstShape, srcShape, share_[slot]);
-                AscendC::PipeBarrier<PIPE_V>();
-                AscendC::Mul(calc_[slot], calc_[slot],
-                             raw_[slot].template ReinterpretCast<float>(), elements);
-                AscendC::PipeBarrier<PIPE_V>();
-                AscendC::Cast(right_[slot], calc_[slot], AscendC::RoundMode::CAST_RINT, elements);
+            AscendC::Cast(calc_[slot], io_[slot], AscendC::RoundMode::CAST_NONE, elements);
+            AscendC::PipeBarrier<PIPE_V>();
+            if constexpr (HAS_P) {
+                if constexpr (std::is_same<PType, float>::value) {
+                    AscendC::Sub(calc_[slot], calc_[slot], raw_[slot].template ReinterpretCast<float>(), elements);
+                } else {
+                    AscendC::Cast(cast_[slot], raw_[slot].template ReinterpretCast<bfloat16_t>(),
+                                  AscendC::RoundMode::CAST_NONE, elements);
+                    AscendC::PipeBarrier<PIPE_V>();
+                    AscendC::Sub(calc_[slot], calc_[slot], cast_[slot], elements);
+                }
             }
-        }
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::Cast(io_[slot], calc_[slot], AscendC::RoundMode::CAST_RINT, elements);
+            if constexpr (WRITE_RIGHT) {
+                if constexpr (CompilePolicy::GATE_MODE == FwdHGateMode::SCALAR_G) {
+                    uint32_t dstShape[2] = {rows, FWD_H_V};
+                    uint32_t srcShape[2] = {rows, 1};
+                    AscendC::Broadcast<float, 2, 1>(
+                        raw_[slot].template ReinterpretCast<float>(), gateFp32_[slot][row],
+                        dstShape, srcShape, share_[slot]);
+                    AscendC::PipeBarrier<PIPE_V>();
+                    AscendC::Mul(calc_[slot], calc_[slot],
+                                 raw_[slot].template ReinterpretCast<float>(), elements);
+                    AscendC::PipeBarrier<PIPE_V>();
+                    AscendC::Cast(right_[slot], calc_[slot], AscendC::RoundMode::CAST_RINT, elements);
+                }
+            }
 
-        AscendC::GlobalTensor<bfloat16_t> vNew;
-        vNew.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args_.vNew));
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(IoDoneEvent(slot));
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(IoDoneEvent(slot));
-        AscendC::DataCopy(vNew[UOffset(unit, chunk, head, row)], io_[slot], elements);
-        if constexpr (WRITE_RIGHT) {
-            const uint64_t rightOffset = args_.tiling.vUpdateWorkspaceOffset / sizeof(bfloat16_t) +
-                FwdHCoreSlotOffset(coreIdx_, head.roundHead, FWD_H_CHUNK * FWD_H_V) +
-                row * FWD_H_V;
-            AscendC::GlobalTensor<bfloat16_t> rightGm;
-            rightGm.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args_.workspace));
-            if constexpr (CompilePolicy::GATE_MODE == FwdHGateMode::SCALAR_G) {
-                AscendC::DataCopy(rightGm[rightOffset], right_[slot], elements);
-            } else {
-                AscendC::DataCopy(rightGm[rightOffset], io_[slot], elements);
+            AscendC::GlobalTensor<bfloat16_t> vNew;
+            vNew.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args_.vNew));
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(IoDoneEvent(slot));
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(IoDoneEvent(slot));
+            AscendC::DataCopy(vNew[UOffset(unit, chunk, head, row)], io_[slot], elements);
+            if constexpr (WRITE_RIGHT) {
+                const uint64_t rightOffset = args_.tiling.vUpdateWorkspaceOffset / sizeof(bfloat16_t) +
+                    FwdHCoreSlotOffset(coreIdx_, head.roundHead, FWD_H_CHUNK * FWD_H_V) +
+                    row * FWD_H_V;
+                AscendC::GlobalTensor<bfloat16_t> rightGm;
+                rightGm.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args_.workspace));
+                if constexpr (CompilePolicy::GATE_MODE == FwdHGateMode::SCALAR_G) {
+                    AscendC::DataCopy(rightGm[rightOffset], right_[slot], elements);
+                } else {
+                    AscendC::DataCopy(rightGm[rightOffset], io_[slot], elements);
+                }
             }
-        }
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(IoFreeEvent(slot));
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(IoFreeEvent(slot));
     }
 
     template <bool HAS_P, bool WRITE_RIGHT>
@@ -449,8 +453,11 @@ private:
                 CompleteStage1Pair(unit, chunk, pairSlot - 1U, hasP, writeRight);
             }
             if (hasP) {
-                AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(
-                    FwdHAivLocalFlag(FWD_H_P_READY_FLAG, pairSlot));
+                {
+                    GDN_TIMER_SCOPE(timer_, H_WAIT);
+                    AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(
+                        FwdHAivLocalFlag(FWD_H_P_READY_FLAG, pairSlot));
+                }
             }
             if (FwdHMode2PairHasHead(unit.headRound.activeHeadCount, pairSlot, aiv_)) {
                 const FwdHHeadBinding &head = unit.headRound.heads[pairSlot * 2U + aiv_];
@@ -577,78 +584,79 @@ private:
                                              const FwdHHeadBinding &head,
                                              uint32_t row)
     {
-        const uint32_t slot = head.localSlot;
-        if constexpr (WAIT_READY) {
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(IoReadyEvent(slot));
-        }
-        if constexpr (CompilePolicy::STATE_FP32) {
-            if (chunk.first && args_.tiling.useInitialState == 0) {
-                AscendC::Duplicate(calc_[slot], 0.0f, TILE_ELEMENTS);
+        GDN_TIMER_SCOPE(timer_, H_STATE_UPDATE);
+            const uint32_t slot = head.localSlot;
+            if constexpr (WAIT_READY) {
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(IoReadyEvent(slot));
             }
-        }
-        if constexpr (!CompilePolicy::STATE_FP32) {
-            AscendC::Cast(calc_[slot], stateBf16_[slot][row * FWD_H_V],
-                          AscendC::RoundMode::CAST_NONE, TILE_ELEMENTS);
-        }
-        AscendC::PipeBarrier<PIPE_V>();
-        if constexpr (CompilePolicy::GATE_MODE == FwdHGateMode::SCALAR_G) {
-            const float factor = ReadScalar(alpha_[slot], 0, slot);
-            AscendC::Muls(calc_[slot], calc_[slot], factor, TILE_ELEMENTS);
-        } else if constexpr (STATE_V_FIRST) {
-            for (uint32_t localRow = 0; localRow < TILE_ROWS; ++localRow) {
-                AscendC::Mul(calc_[slot][localRow * FWD_H_V],
-                             calc_[slot][localRow * FWD_H_V], gateFp32_[slot], FWD_H_V);
-            }
-        } else {
-            uint32_t dstShape[2] = {TILE_ROWS, FWD_H_V};
-            uint32_t srcShape[2] = {TILE_ROWS, 1};
-            AscendC::Broadcast<float, 2, 1>(cast_[slot], gateFp32_[slot][row],
-                                            dstShape, srcShape, share_[slot]);
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Mul(calc_[slot], calc_[slot], cast_[slot], TILE_ELEMENTS);
-        }
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Add(calc_[slot], calc_[slot],
-                     raw_[slot].template ReinterpretCast<float>(), TILE_ELEMENTS);
-        AscendC::PipeBarrier<PIPE_V>();
-        if constexpr (CompilePolicy::STATE_FP32) {
-            AscendC::GlobalTensor<float> state;
-            state.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args_.workspace));
-            const uint64_t stateOffset = args_.tiling.kDecayWorkspaceOffset / sizeof(float) +
-                FwdHCoreSlotOffset(coreIdx_, head.roundHead, FWD_H_K * FWD_H_V) + row * FWD_H_V;
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(IoDoneEvent(slot));
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(IoDoneEvent(slot));
-            AscendC::DataCopy(state[stateOffset], calc_[slot], TILE_ELEMENTS);
-            if constexpr (!WRITE_H) {
-                if (args_.tiling.storeFinalState != 0) {
-                    AscendC::GlobalTensor<float> finalState;
-                    finalState.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args_.finalState));
-                    const uint64_t finalOffset = FwdHStateOffset<STATE_V_FIRST>(
-                        args_.tiling, unit.sequence.sequence, head.hv, 0, 0) + row * FWD_H_V;
-                    AscendC::DataCopy(finalState[finalOffset], calc_[slot], TILE_ELEMENTS);
+            if constexpr (CompilePolicy::STATE_FP32) {
+                if (chunk.first && args_.tiling.useInitialState == 0) {
+                    AscendC::Duplicate(calc_[slot], 0.0f, TILE_ELEMENTS);
                 }
             }
-        } else {
-            AscendC::Cast(stateBf16_[slot][row * FWD_H_V], calc_[slot],
-                          AscendC::RoundMode::CAST_RINT, TILE_ELEMENTS);
+            if constexpr (!CompilePolicy::STATE_FP32) {
+                AscendC::Cast(calc_[slot], stateBf16_[slot][row * FWD_H_V],
+                              AscendC::RoundMode::CAST_NONE, TILE_ELEMENTS);
+            }
             AscendC::PipeBarrier<PIPE_V>();
-            if constexpr (!WRITE_H) {
-                // Terminal BF16 state has no per-tile MTE3 copy. Bridge V to MTE3 before
-                // releasing the slot so the next MTE2 cannot overwrite raw_ early.
+            if constexpr (CompilePolicy::GATE_MODE == FwdHGateMode::SCALAR_G) {
+                const float factor = ReadScalar(alpha_[slot], 0, slot);
+                AscendC::Muls(calc_[slot], calc_[slot], factor, TILE_ELEMENTS);
+            } else if constexpr (STATE_V_FIRST) {
+                for (uint32_t localRow = 0; localRow < TILE_ROWS; ++localRow) {
+                    AscendC::Mul(calc_[slot][localRow * FWD_H_V],
+                                 calc_[slot][localRow * FWD_H_V], gateFp32_[slot], FWD_H_V);
+                }
+            } else {
+                uint32_t dstShape[2] = {TILE_ROWS, FWD_H_V};
+                uint32_t srcShape[2] = {TILE_ROWS, 1};
+                AscendC::Broadcast<float, 2, 1>(cast_[slot], gateFp32_[slot][row],
+                                                dstShape, srcShape, share_[slot]);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Mul(calc_[slot], calc_[slot], cast_[slot], TILE_ELEMENTS);
+            }
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::Add(calc_[slot], calc_[slot],
+                         raw_[slot].template ReinterpretCast<float>(), TILE_ELEMENTS);
+            AscendC::PipeBarrier<PIPE_V>();
+            if constexpr (CompilePolicy::STATE_FP32) {
+                AscendC::GlobalTensor<float> state;
+                state.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args_.workspace));
+                const uint64_t stateOffset = args_.tiling.kDecayWorkspaceOffset / sizeof(float) +
+                    FwdHCoreSlotOffset(coreIdx_, head.roundHead, FWD_H_K * FWD_H_V) + row * FWD_H_V;
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(IoDoneEvent(slot));
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(IoDoneEvent(slot));
+                AscendC::DataCopy(state[stateOffset], calc_[slot], TILE_ELEMENTS);
+                if constexpr (!WRITE_H) {
+                    if (args_.tiling.storeFinalState != 0) {
+                        AscendC::GlobalTensor<float> finalState;
+                        finalState.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args_.finalState));
+                        const uint64_t finalOffset = FwdHStateOffset<STATE_V_FIRST>(
+                            args_.tiling, unit.sequence.sequence, head.hv, 0, 0) + row * FWD_H_V;
+                        AscendC::DataCopy(finalState[finalOffset], calc_[slot], TILE_ELEMENTS);
+                    }
+                }
+            } else {
+                AscendC::Cast(stateBf16_[slot][row * FWD_H_V], calc_[slot],
+                              AscendC::RoundMode::CAST_RINT, TILE_ELEMENTS);
+                AscendC::PipeBarrier<PIPE_V>();
+                if constexpr (!WRITE_H) {
+                    // Terminal BF16 state has no per-tile MTE3 copy. Bridge V to MTE3 before
+                    // releasing the slot so the next MTE2 cannot overwrite raw_ early.
+                    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(IoDoneEvent(slot));
+                    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(IoDoneEvent(slot));
+                }
             }
-        }
-        if constexpr (WRITE_H) {
-            AscendC::Cast(io_[slot], calc_[slot], AscendC::RoundMode::CAST_RINT, TILE_ELEMENTS);
-            AscendC::GlobalTensor<bfloat16_t> h;
-            h.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args_.h));
-            const FwdHChunkSpan next = FwdHBuildChunk(unit.sequence, chunk.chunk + 1);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(IoDoneEvent(slot));
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(IoDoneEvent(slot));
-            AscendC::DataCopy(h[HOffset(unit, next, head) + row * FWD_H_V], io_[slot], TILE_ELEMENTS);
-        }
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(IoFreeEvent(slot));
+            if constexpr (WRITE_H) {
+                AscendC::Cast(io_[slot], calc_[slot], AscendC::RoundMode::CAST_RINT, TILE_ELEMENTS);
+                AscendC::GlobalTensor<bfloat16_t> h;
+                h.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args_.h));
+                const FwdHChunkSpan next = FwdHBuildChunk(unit.sequence, chunk.chunk + 1);
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(IoDoneEvent(slot));
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(IoDoneEvent(slot));
+                AscendC::DataCopy(h[HOffset(unit, next, head) + row * FWD_H_V], io_[slot], TILE_ELEMENTS);
+            }
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(IoFreeEvent(slot));
     }
 
     template <bool WRITE_H>
@@ -713,8 +721,11 @@ private:
                 // 先消费已完成 MTE2 的 ping，再等待下一 pair 的 D_READY。
                 CompleteStage3Pair(unit, chunk, pairSlot - 1U, writeH);
             }
-            AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(
-                FwdHAivLocalFlag(FWD_H_D_READY_FLAG, pairSlot));
+            {
+                GDN_TIMER_SCOPE(timer_, H_WAIT);
+                AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(
+                    FwdHAivLocalFlag(FWD_H_D_READY_FLAG, pairSlot));
+            }
             if (FwdHMode2PairHasHead(unit.headRound.activeHeadCount, pairSlot, aiv_)) {
                 const FwdHHeadBinding &head = unit.headRound.heads[pairSlot * 2U + aiv_];
                 PrefetchStage3Head(unit, chunk, head);
@@ -744,8 +755,11 @@ private:
             const FwdHChunkSpan chunk = FwdHBuildChunk(unit.sequence, chunkId);
             if (chunkId > 0) {
                 for (uint32_t pairSlot = 0; pairSlot < pairCount; ++pairSlot) {
-                    AscendC::CrossCoreWaitFlag<0x2, PIPE_V>(
-                        FwdHAivLocalFlag(FWD_H_RIGHT_FREE_FLAG, pairSlot));
+                    {
+                        GDN_TIMER_SCOPE(timer_, H_WAIT);
+                        AscendC::CrossCoreWaitFlag<0x2, PIPE_V>(
+                            FwdHAivLocalFlag(FWD_H_RIGHT_FREE_FLAG, pairSlot));
+                    }
                 }
             }
             RunStage1(unit, chunk);
@@ -755,8 +769,11 @@ private:
         }
         if (args_.tiling.storeFinalState != 0) {
             for (uint32_t pairSlot = 0; pairSlot < pairCount; ++pairSlot) {
-                AscendC::CrossCoreWaitFlag<0x2, PIPE_V>(
-                    FwdHAivLocalFlag(FWD_H_RIGHT_FREE_FLAG, pairSlot));
+                {
+                    GDN_TIMER_SCOPE(timer_, H_WAIT);
+                    AscendC::CrossCoreWaitFlag<0x2, PIPE_V>(
+                        FwdHAivLocalFlag(FWD_H_RIGHT_FREE_FLAG, pairSlot));
+                }
             }
         }
         // 跨 head_round 前必须把本轮所有 VEC->MTE3 写回收口。AIC 收到 ROUND_DONE 后
@@ -767,7 +784,10 @@ private:
         }
         if (hasCubeWork && hasNextWorkUnit) {
             AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(FwdHAivLocalFlag(FWD_H_ROUND_DONE_FLAG, 0));
-            AscendC::CrossCoreWaitFlag<0x2, PIPE_V>(FwdHAivLocalFlag(FWD_H_ROUND_ACK_FLAG, 0));
+            {
+                GDN_TIMER_SCOPE(timer_, H_WAIT);
+                AscendC::CrossCoreWaitFlag<0x2, PIPE_V>(FwdHAivLocalFlag(FWD_H_ROUND_ACK_FLAG, 0));
+            }
         }
     }
 
@@ -791,6 +811,9 @@ private:
     AscendC::LocalTensor<float> alpha_[FWD_H_AIV_HEAD_SLOTS]{};
     AscendC::LocalTensor<uint8_t> share_[FWD_H_AIV_HEAD_SLOTS]{};
     AscendC::LocalTensor<bfloat16_t> stateBf16_[FWD_H_AIV_HEAD_SLOTS]{};
+
+private:
+    GdnKernelTimer *timer_ = nullptr;
 };
 
 } // namespace GDN

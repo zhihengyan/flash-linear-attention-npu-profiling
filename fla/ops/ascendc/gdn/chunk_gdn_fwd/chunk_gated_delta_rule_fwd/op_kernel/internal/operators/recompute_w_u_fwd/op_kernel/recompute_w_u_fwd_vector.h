@@ -1,3 +1,4 @@
+#include "kernel_utils/gdn_timer/AscendTimerV2_device.hpp"
 /**
  * Copyright (c) 2025 Tianjin University, Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
@@ -32,6 +33,8 @@ template <typename kType, typename betaType, bool kFlattenHeadTasks = false,
           bool kCoefficientGenerationTaskOrder = false>
 class RecomputeWUFwdVectorProcess {
 public:
+    __aicore__ inline void SetTimerPtr(GdnKernelTimer *timer) { timer_ = timer; }
+
     /** @brief constructor */
     __aicore__ inline RecomputeWUFwdVectorProcess(GM_ADDR k_, GM_ADDR v_, GM_ADDR beta_, GM_ADDR A_, GM_ADDR g_, GM_ADDR cu_seqlens_,
                                                         GM_ADDR chunk_indices_, GM_ADDR w_, GM_ADDR u_,
@@ -122,6 +125,9 @@ private:
         __ubuf__ betaType *gIn, uint16_t mSize, uint16_t nSize);
 #endif
 
+
+private:
+    GdnKernelTimer *timer_ = nullptr;
 };
 
 template <typename kType, typename betaType, bool kFlattenHeadTasks, bool kCoefficientGenerationTaskOrder>
@@ -163,16 +169,17 @@ template <typename kType, typename betaType, bool kFlattenHeadTasks, bool kCoeff
 __aicore__ void inline RecomputeWUFwdVectorProcess<kType, betaType, kFlattenHeadTasks,
                                                    kCoefficientGenerationTaskOrder>::Process()
 {
-#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-    ProcessVbAndKbgExpInterleaved();
-#else
-    //计算K * Beta[:None]
-    ProcessVb();
-    pipe->Reset();
-    AscendC::SyncAll<false>();
-    ProcessKbgExp();
-#endif
-    return;
+    GDN_TIMER_SCOPE(timer_, WU_PREPARE);
+    #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        ProcessVbAndKbgExpInterleaved();
+    #else
+        //计算K * Beta[:None]
+        ProcessVb();
+        pipe->Reset();
+        AscendC::SyncAll<false>();
+        ProcessKbgExp();
+    #endif
+        return;
 }
 
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
@@ -196,7 +203,10 @@ __aicore__ inline void RecomputeWUFwdVectorProcess<
 {
     // This is a scalar wait, not a pipelined credit checkpoint: the producer
     // must not enqueue the next MTE3 write until AIC has consumed this slot.
-    Arch::CrossCoreWaitFlag(flagAicSlotFree);
+    {
+        GDN_TIMER_SCOPE(timer_, WU_WAIT);
+        Arch::CrossCoreWaitFlag(flagAicSlotFree);
+    }
 }
 
 template <typename kType, typename betaType, bool kFlattenHeadTasks, bool kCoefficientGenerationTaskOrder>

@@ -5,6 +5,8 @@
 #include "aclnn_chunk_gated_delta_rule_fwd.h"
 
 #include "chunk_gated_delta_rule_fwd.h"
+#include "../../op_kernel/AscendTimerV2.hpp"
+#include "opdev/shape_utils.h"
 #include "../../../chunk_fwd_h/op_host/op_api/chunk_fwd_h.h"
 #include "../../../chunk_fwd_o/op_host/op_api/chunk_fwd_o.h"
 #include "../../../chunk_gated_delta_rule_fwd_prepare/op_host/op_api/chunk_gated_delta_rule_fwd_prepare.h"
@@ -626,7 +628,8 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
     const aclTensor *aOutOptional,
     const aclTensor *hOutOptional,
     uint64_t *workspaceSize,
-    aclOpExecutor **executor)
+    aclOpExecutor **executor,
+    const aclTensor *timerOptional = nullptr)
 {
     ChunkGatedDeltaRuleFwdParams params{
         q, k, v, g, beta, aLogOptional, dtBiasOptional, initialStateOptional,
@@ -637,6 +640,14 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
     CHECK_COND(workspaceSize != nullptr && executor != nullptr, ACLNN_ERR_PARAM_NULLPTR,
                "workspaceSize and executor must not be nullptr.");
     CHECK_RET(CheckRequiredInputs(params) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_NULLPTR);
+    if (timerOptional != nullptr) {
+        CHECK_COND(timerOptional->GetDataType() == DataType::DT_INT64 &&
+                       timerOptional->GetViewShape().GetDimNum() == 1 &&
+                       timerOptional->GetViewShape().GetDim(0) >= AscendTimer::TOTAL_BUFFER_SIZE &&
+                       timerOptional->GetStorageFormat() == Format::FORMAT_ND &&
+                       IsContiguous(timerOptional),
+                   ACLNN_ERR_PARAM_INVALID, "timer must be a contiguous ND int64 vector of sufficient size.");
+    }
     auto uniqueExecutor = CREATE_EXECUTOR();
     CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
     auto executorPtr = uniqueExecutor.get();
@@ -749,7 +760,7 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
             params.allowNegEigval, params.useExp2, params.useQkL2norm,
             params.aLogOptional != nullptr || params.dtBiasOptional != nullptr, betaEffBht != nullptr,
             params.aOutOptional != nullptr, gCumsumBht, w, u, a, qHat, kHat, qRstd,
-            kRstd, betaEffBht, executorPtr);
+            kRstd, betaEffBht, executorPtr, timerOptional);
         GDN_STAGE_CHECK(prepareResult[0] != nullptr && prepareResult[1] != nullptr &&
                             prepareResult[2] != nullptr &&
                             (!params.useQkL2norm ||
@@ -759,13 +770,13 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
         auto hResult = l0op::ChunkFwdH(
             kCompute, w, u, gCumsumBht, nullptr, params.initialStateOptional,
             params.cuSeqlensOptional, params.chunkIndicesOptional, outputFinalState,
-            params.chunkSize, true, params.useExp2, params.stateVFirst, h, vNew, finalState, executorPtr);
+            params.chunkSize, true, params.useExp2, params.stateVFirst, h, vNew, finalState, executorPtr, timerOptional);
         GDN_STAGE_CHECK(hResult[0] != nullptr && hResult[1] != nullptr, 169105);
 
         auto oResult = l0op::ChunkFwdO(
             qCompute, kCompute, vNew, h, gCumsumBht, params.cuSeqlensOptional,
             params.chunkIndicesOptional, params.scale, params.chunkSize, params.useExp2, params.stateVFirst,
-            "BSND", params.oOut, executorPtr);
+            "BSND", params.oOut, executorPtr, timerOptional);
         GDN_STAGE_CHECK(oResult[0] != nullptr, 169106);
 
         if (params.qHatOutOptional != nullptr) {
@@ -866,7 +877,7 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
         outputFinalState, params.chunkSize, params.scale, params.gCumsumOutOptional != nullptr,
         oCompute, finalState,
         gCumsumCompute, aCompute, usePreparedCumsum ? 1 : 0, nativeQkv ? 1 : 0,
-        sequenceMajorOutput ? 1 : 0, executorPtr);
+        sequenceMajorOutput ? 1 : 0, executorPtr, timerOptional);
     GDN_STAGE_CHECK(phase6Result[0] != nullptr && phase6Result[2] != nullptr &&
                         phase6Result[3] != nullptr,
                         169112);
@@ -933,6 +944,53 @@ aclnnStatus aclnnChunkGatedDeltaRuleFwd(
     CHECK_COND(CommonOpExecutorRun(workspace, workspaceSize, executor, stream) == ACLNN_SUCCESS,
                ACLNN_ERR_INNER, "ChunkGatedDeltaRuleFwd launch failed.");
     return ACLNN_SUCCESS;
+}
+
+aclnnStatus aclnnChunkGatedDeltaRuleFwdProfileGetWorkspaceSize(
+    const aclTensor *q,
+    const aclTensor *k,
+    const aclTensor *v,
+    const aclTensor *g,
+    const aclTensor *beta,
+    const aclTensor *aLogOptional,
+    const aclTensor *dtBiasOptional,
+    const aclTensor *initialStateOptional,
+    const aclIntArray *cuSeqlensOptional,
+    const aclIntArray *chunkIndicesOptional,
+    const char *layout,
+    double scale,
+    int64_t chunkSize,
+    bool useExp2,
+    bool useQkL2norm,
+    bool allowNegEigval,
+    bool stateVFirst,
+    const aclTensor *oOut,
+    const aclTensor *finalStateOutOptional,
+    const aclTensor *qHatOutOptional,
+    const aclTensor *kHatOutOptional,
+    const aclTensor *qRstdOutOptional,
+    const aclTensor *kRstdOutOptional,
+    const aclTensor *betaEffOutOptional,
+    const aclTensor *gCumsumOutOptional,
+    const aclTensor *aOutOptional,
+    const aclTensor *hOutOptional,
+    const aclTensor *timer,
+    uint64_t *workspaceSize,
+    aclOpExecutor **executor)
+{
+    CHECK_COND(timer != nullptr, ACLNN_ERR_PARAM_NULLPTR, "profiling requires a timer buffer.");
+    return ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
+        q, k, v, g, beta, aLogOptional, dtBiasOptional, initialStateOptional, cuSeqlensOptional,
+        chunkIndicesOptional, layout, scale, chunkSize, useExp2, useQkL2norm, allowNegEigval,
+        stateVFirst, oOut, finalStateOutOptional, qHatOutOptional, kHatOutOptional, qRstdOutOptional,
+        kRstdOutOptional, betaEffOutOptional, gCumsumOutOptional, aOutOptional, hOutOptional,
+        workspaceSize, executor, timer);
+}
+
+aclnnStatus aclnnChunkGatedDeltaRuleFwdProfile(
+    void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, aclrtStream stream)
+{
+    return aclnnChunkGatedDeltaRuleFwd(workspace, workspaceSize, executor, stream);
 }
 
 #ifdef __cplusplus

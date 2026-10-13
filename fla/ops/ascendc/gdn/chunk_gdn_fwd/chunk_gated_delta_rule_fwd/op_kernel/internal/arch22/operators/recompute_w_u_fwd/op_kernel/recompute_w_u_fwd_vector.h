@@ -1,3 +1,4 @@
+#include "kernel_utils/gdn_timer/AscendTimerV2_device.hpp"
 /**
  * Copyright (c) 2025 Tianjin University, Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
@@ -27,6 +28,8 @@ template <typename kType, typename betaType, bool kFlattenHeadTasks = false,
           bool kAbcTaskOrder = false>
 class RecomputeWUFwdVectorProcess {
 public:
+    __aicore__ inline void SetTimerPtr(GdnKernelTimer *timer) { timer_ = timer; }
+
     bool inputSequenceMajor{false};
     __aicore__ inline void ConfigureInputLayout(bool sequenceMajor) { inputSequenceMajor = sequenceMajor; }
 
@@ -88,6 +91,9 @@ private:
     TBuf<AscendC::TPosition::VECCALC> gFp32Buf;
     // TBuf<AscendC::TPosition::VECCALC> gFp32BrcbBuf;
 
+
+private:
+    GdnKernelTimer *timer_ = nullptr;
 };
 
 template <typename kType, typename betaType, bool kFlattenHeadTasks, bool kAbcTaskOrder>
@@ -129,19 +135,20 @@ template <typename kType, typename betaType, bool kFlattenHeadTasks, bool kAbcTa
 __aicore__ void inline RecomputeWUFwdVectorProcess<kType, betaType, kFlattenHeadTasks,
                                                    kAbcTaskOrder>::Process(const GDN::RecomputeTaskRange *range)
 {
-    taskRange = range;
-    //计算K * Beta[:None]
-    ProcessVb();
-    if (taskRange != nullptr) {
-        // 重建TPipe及向量状态前完成本核Vb；KbgExp可继续与Cube U重叠。
-        AscendC::PipeBarrier<PIPE_ALL>();
-    }
-    pipe->Reset();
-    if (taskRange == nullptr) {
-        AscendC::SyncAll<false>();
-    }
-    ProcessKbgExp();
-    return;
+    GDN_TIMER_SCOPE(timer_, WU_PREPARE);
+        taskRange = range;
+        //计算K * Beta[:None]
+        ProcessVb();
+        if (taskRange != nullptr) {
+            // 重建TPipe及向量状态前完成本核Vb；KbgExp可继续与Cube U重叠。
+            AscendC::PipeBarrier<PIPE_ALL>();
+        }
+        pipe->Reset();
+        if (taskRange == nullptr) {
+            AscendC::SyncAll<false>();
+        }
+        ProcessKbgExp();
+        return;
 }
 
 

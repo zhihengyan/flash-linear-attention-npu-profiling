@@ -2,6 +2,7 @@
  * Copyright (c) 2026 Tianjin University, Ltd.
  * CANN Open Software License Agreement Version 2.0.
  */
+#include "kernel_utils/gdn_timer/AscendTimerV2_device.hpp"
 #include "chunk_gated_delta_rule_fwd_arch22_struct.h"
 #include "gdn_cumsum_prepare.hpp"
 
@@ -347,8 +348,9 @@ __aicore__ inline void RunKktEpilogueBatch(
     GM_ADDR k, GM_ADDR beta, GM_ADDR rawG, GM_ADDR cuSeqlens, GM_ADDR chunkIndices,
     GM_ADDR gCumsumBht, GM_ADDR userWorkspace,
     const __gm__ Arch22ChunkGatedDeltaRuleFwdTrailer *phase6,
-    const Arch22ChunkGatedDeltaRuleFwdAbcTiling &abc, int64_t begin, int64_t end)
+    const Arch22ChunkGatedDeltaRuleFwdAbcTiling &abc, int64_t begin, int64_t end, GdnKernelTimer *timer = nullptr)
 {
+        GDN_TIMER_SCOPE(timer, KKT_EPILOGUE);
     AscendC::TPipe pipe;
     NsChunkScaledDotKkt::ChunkScaledDotKkt<InputT, InputT, true> kkt;
     GM_ADDR aWorkspace = userWorkspace + phase6->aWorkspaceOffset;
@@ -378,7 +380,7 @@ __aicore__ inline void RunFrontBatch(
     GM_ADDR chunkIndices, GM_ADDR gCumsumBht, GM_ADDR A, GM_ADDR w, GM_ADDR u,
     GM_ADDR userWorkspace, const __gm__ Arch22ChunkGatedDeltaRuleFwdTrailer *phase6,
     const Arch22ChunkGatedDeltaRuleFwdAbcTiling &abc,
-    const GdnMegaArch22RecomputeWUTilingData &recomputeTiling)
+    const GdnMegaArch22RecomputeWUTilingData &recomputeTiling, GdnKernelTimer *timer = nullptr)
 {
     constexpr uint64_t FRONT_READY_FLAG = 6;
     constexpr uint64_t FRONT_ACK_DONE_FLAG = 7;
@@ -412,40 +414,52 @@ __aicore__ inline void RunFrontBatch(
     }
     if ASCEND_IS_AIV {
         // 零任务组也消费Stage P的通知，再直接到最终全核会合。
-        AscendC::CrossCoreWaitFlag(SCORE_READY_FLAG);
+        {
+            GDN_TIMER_SCOPE(timer, FRONT_WAIT);
+            AscendC::CrossCoreWaitFlag(SCORE_READY_FLAG);
+        }
         if (ownerBegin < ownerEnd) {
             const uint64_t firstEnd = ownerBegin + capacity < ownerEnd
                 ? ownerBegin + capacity : ownerEnd;
             RunKktEpilogueBatch<InputT, kPreparedCumsum>(
                 k, beta, rawG, cuSeqlens, chunkIndices, gCumsumBht,
-                userWorkspace, phase6, abc, ownerBegin, firstEnd);
+                userWorkspace, phase6, abc, ownerBegin, firstEnd, timer);
         }
     }
     for (uint64_t begin = ownerBegin; begin < ownerEnd; begin += capacity) {
         const uint64_t end = begin + capacity < ownerEnd ? begin + capacity : ownerEnd;
         if ASCEND_IS_AIV {
             AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(FRONT_READY_FLAG);
-            AscendC::CrossCoreWaitFlag(FRONT_ACK_DONE_FLAG);
+            {
+                GDN_TIMER_SCOPE(timer, FRONT_WAIT);
+                AscendC::CrossCoreWaitFlag(FRONT_ACK_DONE_FLAG);
+            }
         }
         if ASCEND_IS_AIC {
-            AscendC::CrossCoreWaitFlag(FRONT_READY_FLAG);
+            {
+                GDN_TIMER_SCOPE(timer, FRONT_WAIT);
+                AscendC::CrossCoreWaitFlag(FRONT_READY_FLAG);
+            }
             AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(FRONT_ACK_DONE_FLAG);
         }
         problem.localParentBegin = static_cast<int64_t>(begin - ownerBegin);
         problem.localParentCount = static_cast<int64_t>(end - begin);
-        GdnFp32Solve::RunOwnedBatch<InputT>(
-            x, userWorkspace + phase6->solveD16Offset, userWorkspace + phase6->solveD32Offset,
-            userWorkspace + phase6->solveD64Offset, A,
-            userWorkspace + phase6->solveWorkspaceOffset, cuSeqlens, problem);
+        {
+            GDN_TIMER_SCOPE(timer, SOLVE);
+            GdnFp32Solve::RunOwnedBatch<InputT>(
+                x, userWorkspace + phase6->solveD16Offset, userWorkspace + phase6->solveD32Offset,
+                userWorkspace + phase6->solveD64Offset, A,
+                userWorkspace + phase6->solveWorkspaceOffset, cuSeqlens, problem);
+        }
         const RecomputeTaskRange range{begin, end, capacity};
         if (recomputeTiling.V == 256) {
             DispatchRecompute<InputT, float, 256, true>(
                 k, v, beta, A, gCumsumBht, cuSeqlens, chunkIndices, w, u,
-                wuWorkspace, &recomputeTiling, &range, abc.qkvLayout == 1);
+                wuWorkspace, &recomputeTiling, &range, abc.qkvLayout == 1, timer);
         } else {
             DispatchRecompute<InputT, float, 128, true>(
                 k, v, beta, A, gCumsumBht, cuSeqlens, chunkIndices, w, u,
-                wuWorkspace, &recomputeTiling, &range, abc.qkvLayout == 1);
+                wuWorkspace, &recomputeTiling, &range, abc.qkvLayout == 1, timer);
         }
         AscendC::PipeBarrier<PIPE_ALL>();
         if ASCEND_IS_AIC {
@@ -457,10 +471,13 @@ __aicore__ inline void RunFrontBatch(
                 const uint64_t nextEnd = end + capacity < ownerEnd ? end + capacity : ownerEnd;
                 RunKktEpilogueBatch<InputT, kPreparedCumsum>(
                     k, beta, rawG, cuSeqlens, chunkIndices, gCumsumBht,
-                    userWorkspace, phase6, abc, end, nextEnd);
+                    userWorkspace, phase6, abc, end, nextEnd, timer);
             }
             // 下一批KKT可与本批Cube WU重叠，但Solve和WU临时区复用须等done。
-            AscendC::CrossCoreWaitFlag(FRONT_ACK_DONE_FLAG);
+            {
+                GDN_TIMER_SCOPE(timer, FRONT_WAIT);
+                AscendC::CrossCoreWaitFlag(FRONT_ACK_DONE_FLAG);
+            }
         }
     }
     // 发布所有W/U/g，并覆盖零任务组；随后沿用原公共g输出及H/O路径。
@@ -472,8 +489,10 @@ template <typename InputT, typename TileShapes, bool kPreparedCumsum = false>
 __aicore__ inline void RunPhase6(
     GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR beta, GM_ADDR rawG, GM_ADDR gk,
     GM_ADDR initialState, GM_ADDR cuSeqlens, GM_ADDR chunkIndices, GM_ADDR o,
-    GM_ADDR finalState, GM_ADDR gCumsumBth, GM_ADDR A, GM_ADDR workspace, GM_ADDR tiling)
+    GM_ADDR finalState, GM_ADDR gCumsumBth, GM_ADDR A, GM_ADDR workspace, GM_ADDR tiling, GM_ADDR timerAddr)
 {
+    GdnKernelTimer timer;
+    TIMER_BLOCK(timer.Init(timerAddr, AscendTimer::PHASE6));
     GM_ADDR userWorkspace = AscendC::GetUserWorkspace(workspace);
     const __gm__ ChunkRecomputeWUFwdHOTrailer *phase5 = GetPhase5Trailer(tiling);
     const __gm__ Arch22ChunkGatedDeltaRuleFwdTrailer *phase6 = GetPhase6Trailer(tiling);
@@ -491,10 +510,14 @@ __aicore__ inline void RunPhase6(
     GM_ADDR solveWorkspace =
         solveWorkspaceBase + coreGroup * abc.solveWorkspacePerCoreBytes;
 
+    TIMER_BLOCK(timer.InitDone());
     if ASCEND_IS_AIC {
         NsChunkKktCube::ChunkKktCube<InputT> kktCube;
         kktCube.ConfigureInputLayout(abc.qkvLayout == 1);
-        kktCube.Process(k, cuSeqlens, chunkIndices, scoreWorkspace, &abc);
+        {
+            GDN_TIMER_SCOPE(&timer, KKT_MM);
+            kktCube.Process(k, cuSeqlens, chunkIndices, scoreWorkspace, &abc);
+        }
         AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(SCORE_READY_FLAG);
     }
     if ASCEND_IS_AIV {
@@ -509,13 +532,19 @@ __aicore__ inline void RunPhase6(
                 abc.B * abc.NT, abc.isVarlen, phase6->outputGCumsum};
             GdnCumsumPrepare::Kernel prepare;
             prepare.Init(prepareArgs);
-            prepare.ProcessMixed();
+            {
+                GDN_TIMER_SCOPE(&timer, CUMSUM);
+                prepare.ProcessMixed();
+            }
         }
     }
     // Every AIC/AIV participant reaches the hand-off.  This publishes all
     // BHT prefixes before KKT, Solve, or recompute can consume them.
     if constexpr (kPreparedCumsum) {
-        AscendC::SyncAll<false>();
+        {
+            GDN_TIMER_SCOPE(&timer, PHASE_WAIT);
+            AscendC::SyncAll<false>();
+        }
     }
     GM_ADDR w = userWorkspace + phase5->wIntermediateOffset;
     GM_ADDR u = userWorkspace + phase5->uIntermediateOffset;
@@ -526,7 +555,7 @@ __aicore__ inline void RunPhase6(
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
     RunFrontBatch<InputT, kPreparedCumsum>(
         k, v, beta, rawG, cuSeqlens, chunkIndices, gCumsumBht, A, w, u,
-        userWorkspace, phase6, abc, recomputeTiling);
+        userWorkspace, phase6, abc, recomputeTiling, &timer);
 #else
     constexpr bool kStoreFp32SolveInput = false;
     if ASCEND_IS_AIV {
@@ -548,8 +577,14 @@ __aicore__ inline void RunPhase6(
         if constexpr (kStoreFp32SolveInput) {
             kkt.InitSolveFp32Input(userWorkspace + phase6->solveFp32InputOffset);
         }
-        AscendC::CrossCoreWaitFlag(SCORE_READY_FLAG);
-        kkt.ProcessEpilogueForSolve(abc.tilesPerCore);
+        {
+            GDN_TIMER_SCOPE(&timer, SOLVE_WAIT);
+            AscendC::CrossCoreWaitFlag(SCORE_READY_FLAG);
+        }
+        {
+            GDN_TIMER_SCOPE(&timer, KKT_EPILOGUE);
+            kkt.ProcessEpilogueForSolve(abc.tilesPerCore);
+        }
         kktPipe.Reset();
     }
 
@@ -558,30 +593,54 @@ __aicore__ inline void RunPhase6(
     if (abc.BT == 64 && abc.isVarlen != 0) {
         // Match the public BT64 SolveTri path exactly: physical TND layout,
         // chunk-to-head task order, and the native FP32 implementation.
-        AscendC::SyncAll<false>();
+        {
+            GDN_TIMER_SCOPE(&timer, PHASE_WAIT);
+            AscendC::SyncAll<false>();
+        }
         NsPhase6SolveLayoutStaging::TransposeBhtTnd<InputT>(
             aWorkspace, tndInput, &abc, true);
-        AscendC::SyncAll<false>();
+        {
+            GDN_TIMER_SCOPE(&timer, PHASE_WAIT);
+            AscendC::SyncAll<false>();
+        }
 
         Arch22ChunkGatedDeltaRuleFwdAbcTiling solveTiling = abc;
         solveTiling.layoutMode = 2;
-        RunSolvePhase<InputT, 64>(tndInput, cuSeqlens, chunkIndices,
-                                  tndOutput, solveWorkspaceBase, &solveTiling);
+        {
+            GDN_TIMER_SCOPE(&timer, SOLVE);
+            RunSolvePhase<InputT, 64>(tndInput, cuSeqlens, chunkIndices,
+                                      tndOutput, solveWorkspaceBase, &solveTiling);
+        }
 
-        AscendC::SyncAll<false>();
+        {
+            GDN_TIMER_SCOPE(&timer, PHASE_WAIT);
+            AscendC::SyncAll<false>();
+        }
         NsPhase6SolveLayoutStaging::TransposeBhtTnd<InputT>(
             tndOutput, A, &abc, false);
-        AscendC::SyncAll<false>();
+        {
+            GDN_TIMER_SCOPE(&timer, PHASE_WAIT);
+            AscendC::SyncAll<false>();
+        }
     } else if (abc.BT == 64) {
         // The public SolveTri runs after a kernel boundary.  Recreate that
         // visibility point before its FP32 AIC/AIV protocol consumes the
         // fused KKT epilogue written by all participating vector cores.
-        AscendC::SyncAll<false>();
-        RunSolvePhase<InputT, 64>(aWorkspace, cuSeqlens, chunkIndices, A,
-                                  solveWorkspaceBase, &abc);
+        {
+            GDN_TIMER_SCOPE(&timer, PHASE_WAIT);
+            AscendC::SyncAll<false>();
+        }
+        {
+            GDN_TIMER_SCOPE(&timer, SOLVE);
+            RunSolvePhase<InputT, 64>(aWorkspace, cuSeqlens, chunkIndices, A,
+                                      solveWorkspaceBase, &abc);
+        }
     } else {
-        RunSolvePhase<InputT, 128>(aWorkspace, cuSeqlens, chunkIndices, A,
-                                   solveWorkspace, &abc);
+        {
+            GDN_TIMER_SCOPE(&timer, SOLVE);
+            RunSolvePhase<InputT, 128>(aWorkspace, cuSeqlens, chunkIndices, A,
+                                       solveWorkspace, &abc);
+        }
     }
     // Solve and recompute share a contiguous task range. Publish solved A
     // before either paired AIV enters its local consumer range.
@@ -589,16 +648,19 @@ __aicore__ inline void RunPhase6(
         AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(PHASE6_SOLVE_DONE_FLAG);
     }
     if ASCEND_IS_AIV {
-        AscendC::CrossCoreWaitFlag(PHASE6_SOLVE_DONE_FLAG);
+        {
+            GDN_TIMER_SCOPE(&timer, SOLVE_WAIT);
+            AscendC::CrossCoreWaitFlag(PHASE6_SOLVE_DONE_FLAG);
+        }
     }
     if (phase5->recompute.V == 256) {
         DispatchRecompute<InputT, float, 256, true>(
             k, v, beta, A, gCumsumBht, cuSeqlens, chunkIndices, w, u,
-            userWorkspace + phase5->recomputeWorkspaceOffset, &recomputeTiling);
+            userWorkspace + phase5->recomputeWorkspaceOffset, &recomputeTiling, nullptr, false, &timer);
     } else {
         DispatchRecompute<InputT, float, 128, true>(
             k, v, beta, A, gCumsumBht, cuSeqlens, chunkIndices, w, u,
-            userWorkspace + phase5->recomputeWorkspaceOffset, &recomputeTiling);
+            userWorkspace + phase5->recomputeWorkspaceOffset, &recomputeTiling, nullptr, false, &timer);
     }
 
 #endif
@@ -625,19 +687,30 @@ __aicore__ inline void RunPhase6(
     GM_ADDR hoIdleReadyAddr = nullptr;
 #endif
     // 全部实际核仍调用 H，保留原 entry 及唯一 wave 的 SyncAll。
+    TIMER_BLOCK(timer.Point(AscendTimer::PHASE6_FRONT_DONE));
     DispatchFwdH<InputT, TileShapes>(k, w, u, gCumsumBht, gk, initialState, cuSeqlens,
                              chunkIndices, h, vNew, finalState, tiling, userWorkspace,
-                             hoIdleConfigPtr, hoIdleReadyAddr, abc.qkvLayout == 1);
+                             hoIdleConfigPtr, hoIdleReadyAddr, abc.qkvLayout == 1, &timer);
+
+    TIMER_BLOCK(timer.Point(AscendTimer::PHASE6_H_DISPATCH_DONE));
 
     if (!hoIdleEnabled) {
+        TIMER_BLOCK(timer.HoWaitBegin());
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
         // H publishes h/vNew through MTE3 and O first consumes them through MTE2.
         // Limit the global hand-off to those pipelines instead of draining PIPE_ALL.
-        AscendC::SyncAll<false, PHASE6_HO_SYNC_CONFIG>();
+        {
+            GDN_TIMER_SCOPE(&timer, PHASE_WAIT);
+            AscendC::SyncAll<false, PHASE6_HO_SYNC_CONFIG>();
+        }
 #else
         // DAV_2201 supports only the full-pipeline SyncAll overload.
-        AscendC::SyncAll<false>();
+        {
+            GDN_TIMER_SCOPE(&timer, PHASE_WAIT);
+            AscendC::SyncAll<false>();
+        }
 #endif
+        TIMER_BLOCK(timer.HoWaitEnd());
     }
 
     const uint64_t oTilingOffset =
@@ -650,7 +723,7 @@ __aicore__ inline void RunPhase6(
         // fallback：原 H -> arch310 定制/220 全 PIPE SyncAll -> 全核 O，
         // 不额外增加收尾屏障。
         DispatchFwdO<InputT>(q, k, vNew, h, gCumsumBht, cuSeqlens, chunkIndices, o,
-                     userWorkspace, &oTiling, nullptr, nullptr, abc.qkvLayout == 1, abc.oLayout == 1);
+                     userWorkspace, &oTiling, nullptr, nullptr, abc.qkvLayout == 1, abc.oLayout == 1, &timer);
     } else {
         // 新路径：H/O 之间不再执行全核 SyncAll（否则不会重叠）。生产者前缀
         // [0, P) 完成 H 后直达最终会合；仅空闲物理核组 [P, C) 执行 O，O 内部
@@ -659,12 +732,16 @@ __aicore__ inline void RunPhase6(
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
         if (coreGroup >= hoIdleConfig.producerCount) {
             DispatchFwdO<InputT>(q, k, vNew, h, gCumsumBht, cuSeqlens, chunkIndices, o,
-                         userWorkspace, &oTiling, &hoIdleConfig, hoIdleReadyAddr, abc.qkvLayout == 1, abc.oLayout == 1);
+                         userWorkspace, &oTiling, &hoIdleConfig, hoIdleReadyAddr, abc.qkvLayout == 1, abc.oLayout == 1, &timer);
         }
 #endif
         // 所有核在条件 O 之后共同执行一次最终全核会合。
-        AscendC::SyncAll<false>();
+        {
+            GDN_TIMER_SCOPE(&timer, PHASE_WAIT);
+            AscendC::SyncAll<false>();
+        }
     }
+    TIMER_BLOCK(timer.Finish());
 }
 
 } // namespace
@@ -672,7 +749,7 @@ __aicore__ inline void RunPhase6(
 
 extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd(
     GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR beta, GM_ADDR a_storage, GM_ADDR raw_g,
-    GM_ADDR gk, GM_ADDR initial_state, GM_ADDR cu_seqlens, GM_ADDR chunk_indices,
+    GM_ADDR gk, GM_ADDR initial_state, GM_ADDR cu_seqlens, GM_ADDR chunk_indices, GM_ADDR timerAddr,
     GM_ADDR o, GM_ADDR final_state, GM_ADDR g_cumsum_bth, GM_ADDR A,
     GM_ADDR workspace, GM_ADDR tiling)
 {
@@ -682,21 +759,21 @@ extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd(
         KERNEL_TASK_TYPE(1, KERNEL_TYPE_MIX_AIC_1_2);
         GDN::RunPhase6<DTYPE_Q, Catlass::Gemm::Kernel::GDNFwdHTileShapes128>(
             q, k, v, beta, raw_g, gk, initial_state, cu_seqlens, chunk_indices,
-            o, final_state, g_cumsum_bth, A, workspace, tiling);
+            o, final_state, g_cumsum_bth, A, workspace, tiling, timerAddr);
     } else if (TILING_KEY_IS(2)) {
         KERNEL_TASK_TYPE(2, KERNEL_TYPE_MIX_AIC_1_2);
         GDN::RunPhase6<DTYPE_Q, Catlass::Gemm::Kernel::GDNFwdHTileShapes256>(
             q, k, v, beta, raw_g, gk, initial_state, cu_seqlens, chunk_indices,
-            o, final_state, g_cumsum_bth, A, workspace, tiling);
+            o, final_state, g_cumsum_bth, A, workspace, tiling, timerAddr);
     } else if (TILING_KEY_IS(3)) {
         KERNEL_TASK_TYPE(3, KERNEL_TYPE_MIX_AIC_1_2);
         GDN::RunPhase6<DTYPE_Q, Catlass::Gemm::Kernel::GDNFwdHTileShapes128, true>(
             q, k, v, beta, raw_g, gk, initial_state, cu_seqlens, chunk_indices,
-            o, final_state, g_cumsum_bth, A, workspace, tiling);
+            o, final_state, g_cumsum_bth, A, workspace, tiling, timerAddr);
     } else if (TILING_KEY_IS(4)) {
         KERNEL_TASK_TYPE(4, KERNEL_TYPE_MIX_AIC_1_2);
         GDN::RunPhase6<DTYPE_Q, Catlass::Gemm::Kernel::GDNFwdHTileShapes256, true>(
             q, k, v, beta, raw_g, gk, initial_state, cu_seqlens, chunk_indices,
-            o, final_state, g_cumsum_bth, A, workspace, tiling);
+            o, final_state, g_cumsum_bth, A, workspace, tiling, timerAddr);
     }
 }

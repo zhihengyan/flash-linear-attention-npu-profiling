@@ -1,3 +1,4 @@
+#include "kernel_utils/gdn_timer/AscendTimerV2_device.hpp"
 /**
  * Copyright (c) 2026 Tianjin University, Ltd.
  * CANN Open Software License Agreement Version 2.0.
@@ -45,7 +46,7 @@ __aicore__ inline void RunFwdH(GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_AD
                                GM_ADDR h, GM_ADDR vNew, GM_ADDR finalState, GM_ADDR tiling,
                                GM_ADDR userWorkspace,
                                const GdnHoPipeline::HoPipelineConfig *idleConfig = nullptr,
-                               GM_ADDR hoReadyAddr = nullptr, bool inputSequenceMajor = false)
+                               GM_ADDR hoReadyAddr = nullptr, bool inputSequenceMajor = false, GdnKernelTimer *timer = nullptr)
 {
     // Keep the same H implementation mode as the established FwdHO kernel.
     // The final boolean enables the H/O fused scheduling path; using the
@@ -53,6 +54,7 @@ __aicore__ inline void RunFwdH(GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_AD
     using Kernel = Catlass::Gemm::Kernel::GDNFwdHKernel<
         InputT, GT, StateT, float, TileShapes, kGated, true, false, true>;
     Kernel kernel;
+    TIMER_BLOCK(kernel.SetTimerPtr(timer));
     kernel.Init(k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
                 tiling, userWorkspace);
     if (idleConfig != nullptr) {
@@ -69,7 +71,7 @@ __aicore__ inline void DispatchFwdH(GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, 
                                     GM_ADDR h, GM_ADDR vNew, GM_ADDR finalState, GM_ADDR tiling,
                                     GM_ADDR userWorkspace,
                                     const GdnHoPipeline::HoPipelineConfig *idleConfig = nullptr,
-                                    GM_ADDR hoReadyAddr = nullptr, bool inputSequenceMajor = false)
+                                    GM_ADDR hoReadyAddr = nullptr, bool inputSequenceMajor = false, GdnKernelTimer *timer = nullptr)
 {
     const __gm__ GdnMegaArch22FwdHTilingData *hTiling =
         reinterpret_cast<const __gm__ GdnMegaArch22FwdHTilingData *>(tiling);
@@ -80,20 +82,20 @@ __aicore__ inline void DispatchFwdH(GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, 
         if (hTiling->useGk) {
             RunFwdH<InputT, float, float, TileShapes, true>(
                 k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-                tiling, userWorkspace, idleConfig, hoReadyAddr, inputSequenceMajor);
+                tiling, userWorkspace, idleConfig, hoReadyAddr, inputSequenceMajor, timer);
         } else {
             RunFwdH<InputT, float, float, TileShapes, false>(
                 k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-                tiling, userWorkspace, idleConfig, hoReadyAddr, inputSequenceMajor);
+                tiling, userWorkspace, idleConfig, hoReadyAddr, inputSequenceMajor, timer);
         }
     } else if (hTiling->useGk) {
         RunFwdH<InputT, float, InputT, TileShapes, true>(
             k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-            tiling, userWorkspace, idleConfig, hoReadyAddr, inputSequenceMajor);
+            tiling, userWorkspace, idleConfig, hoReadyAddr, inputSequenceMajor, timer);
     } else {
         RunFwdH<InputT, float, InputT, TileShapes, false>(
             k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-            tiling, userWorkspace, idleConfig, hoReadyAddr, inputSequenceMajor);
+            tiling, userWorkspace, idleConfig, hoReadyAddr, inputSequenceMajor, timer);
     }
 }
 
@@ -102,7 +104,7 @@ template <typename TileShapes>
 __aicore__ inline void DispatchFwdH(GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk,
                                     GM_ADDR initialState, GM_ADDR cuSeqlens, GM_ADDR chunkIndices,
                                     GM_ADDR h, GM_ADDR vNew, GM_ADDR finalState, GM_ADDR tiling,
-                                    GM_ADDR userWorkspace)
+                                    GM_ADDR userWorkspace, GdnKernelTimer *timer = nullptr)
 {
     const __gm__ GdnMegaArch22FwdHTilingData *hTiling =
         reinterpret_cast<const __gm__ GdnMegaArch22FwdHTilingData *>(tiling);
@@ -113,78 +115,78 @@ __aicore__ inline void DispatchFwdH(GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, 
                 if (useGk) {
                     RunFwdH<bfloat16_t, float, float, TileShapes, true>(
                         k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-                        tiling, userWorkspace);
+                        tiling, userWorkspace, nullptr, nullptr, false, timer);
                 } else {
                     RunFwdH<bfloat16_t, float, float, TileShapes, false>(
                         k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-                        tiling, userWorkspace);
+                        tiling, userWorkspace, nullptr, nullptr, false, timer);
                 }
             } else if (useGk) {
                 RunFwdH<bfloat16_t, bfloat16_t, float, TileShapes, true>(
                     k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-                    tiling, userWorkspace);
+                    tiling, userWorkspace, nullptr, nullptr, false, timer);
             } else {
                 RunFwdH<bfloat16_t, bfloat16_t, float, TileShapes, false>(
                     k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-                    tiling, userWorkspace);
+                    tiling, userWorkspace, nullptr, nullptr, false, timer);
             }
         } else if (hTiling->gDataType == 2) {
             if (useGk) {
                 RunFwdH<bfloat16_t, float, bfloat16_t, TileShapes, true>(
                     k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-                    tiling, userWorkspace);
+                    tiling, userWorkspace, nullptr, nullptr, false, timer);
             } else {
                 RunFwdH<bfloat16_t, float, bfloat16_t, TileShapes, false>(
                     k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-                    tiling, userWorkspace);
+                    tiling, userWorkspace, nullptr, nullptr, false, timer);
             }
         } else if (useGk) {
             RunFwdH<bfloat16_t, bfloat16_t, bfloat16_t, TileShapes, true>(
                 k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-                tiling, userWorkspace);
+                tiling, userWorkspace, nullptr, nullptr, false, timer);
         } else {
             RunFwdH<bfloat16_t, bfloat16_t, bfloat16_t, TileShapes, false>(
                 k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-                tiling, userWorkspace);
+                tiling, userWorkspace, nullptr, nullptr, false, timer);
         }
     } else if (hTiling->stateDataType == 2) {
         if (hTiling->gDataType == 2) {
             if (useGk) {
                 RunFwdH<half, float, float, TileShapes, true>(
                     k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-                    tiling, userWorkspace);
+                    tiling, userWorkspace, nullptr, nullptr, false, timer);
             } else {
                 RunFwdH<half, float, float, TileShapes, false>(
                     k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-                    tiling, userWorkspace);
+                    tiling, userWorkspace, nullptr, nullptr, false, timer);
             }
         } else if (useGk) {
             RunFwdH<half, half, float, TileShapes, true>(
                 k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-                tiling, userWorkspace);
+                tiling, userWorkspace, nullptr, nullptr, false, timer);
         } else {
             RunFwdH<half, half, float, TileShapes, false>(
                 k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-                tiling, userWorkspace);
+                tiling, userWorkspace, nullptr, nullptr, false, timer);
         }
     } else if (hTiling->gDataType == 2) {
         if (useGk) {
             RunFwdH<half, float, half, TileShapes, true>(
                 k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-                tiling, userWorkspace);
+                tiling, userWorkspace, nullptr, nullptr, false, timer);
         } else {
             RunFwdH<half, float, half, TileShapes, false>(
                 k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-                tiling, userWorkspace);
+                tiling, userWorkspace, nullptr, nullptr, false, timer);
         }
     } else if (useGk) {
         RunFwdH<half, half, half, TileShapes, true>(
             k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-            tiling, userWorkspace);
+            tiling, userWorkspace, nullptr, nullptr, false, timer);
     } else {
         RunFwdH<half, half, half, TileShapes, false>(
             k, w, u, g, gk, initialState, cuSeqlens, chunkIndices, h, vNew, finalState,
-            tiling, userWorkspace);
+            tiling, userWorkspace, nullptr, nullptr, false, timer);
     }
 }
 
@@ -234,10 +236,11 @@ __aicore__ inline void RunFwdO(GM_ADDR q, GM_ADDR k, GM_ADDR vNew, GM_ADDR h, GM
                                GM_ADDR cuSeqlens, GM_ADDR chunkIndices, GM_ADDR o,
                                GM_ADDR userWorkspace, const GdnMegaArch22FwdOTilingData *tiling,
                                const GdnHoPipeline::HoPipelineConfig *idleConfig = nullptr,
-                               GM_ADDR hoReadyAddr = nullptr, bool inputSequenceMajor = false, bool outputSequenceMajor = false)
+                               GM_ADDR hoReadyAddr = nullptr, bool inputSequenceMajor = false, bool outputSequenceMajor = false, GdnKernelTimer *timer = nullptr)
 {
     using Kernel = Catlass::Gemm::Kernel::GDNFwdOKernel<InputT, GT, float, true>;
     Kernel kernel;
+    TIMER_BLOCK(kernel.SetTimerPtr(timer));
     kernel.Init(q, k, vNew, h, g, cuSeqlens, chunkIndices, o, tiling, userWorkspace);
     if (idleConfig != nullptr) {
         kernel.ConfigureIdlePipeline(*idleConfig, hoReadyAddr);
@@ -253,13 +256,14 @@ __aicore__ inline void RunRecompute(
     GM_ADDR k, GM_ADDR v, GM_ADDR beta, GM_ADDR A, GM_ADDR g, GM_ADDR cuSeqlens,
     GM_ADDR chunkIndices, GM_ADDR w, GM_ADDR u, GM_ADDR workspace,
     const GdnMegaArch22RecomputeWUTilingData *tiling,
-    const GDN::RecomputeTaskRange *taskRange = nullptr, bool inputSequenceMajor = false)
+    const GDN::RecomputeTaskRange *taskRange = nullptr, bool inputSequenceMajor = false, GdnKernelTimer *timer = nullptr)
 {
     if ASCEND_IS_AIC {
         RecomputeWUFwdProcess<kType, betaType, typename TileShapes::L1TileShape,
                               typename TileShapes::L0TileShape, true, kAbcTaskOrder>
             process(k, v, beta, A, g, cuSeqlens, chunkIndices, w, u, workspace);
         process.Init(*tiling);
+        TIMER_BLOCK(process.SetTimerPtr(timer));
         process.Process(taskRange);
     }
     if ASCEND_IS_AIV {
@@ -268,6 +272,7 @@ __aicore__ inline void RunRecompute(
             k, v, beta, A, g, cuSeqlens, chunkIndices, w, u, workspace);
         process.Init(*tiling, &pipe);
         process.ConfigureInputLayout(inputSequenceMajor);
+        TIMER_BLOCK(process.SetTimerPtr(timer));
         process.Process(taskRange);
     }
 }
@@ -277,16 +282,16 @@ __aicore__ inline void DispatchRecompute(
     GM_ADDR k, GM_ADDR v, GM_ADDR beta, GM_ADDR A, GM_ADDR g, GM_ADDR cuSeqlens,
     GM_ADDR chunkIndices, GM_ADDR w, GM_ADDR u, GM_ADDR workspace,
     const GdnMegaArch22RecomputeWUTilingData *tiling,
-    const GDN::RecomputeTaskRange *taskRange = nullptr, bool inputSequenceMajor = false)
+    const GDN::RecomputeTaskRange *taskRange = nullptr, bool inputSequenceMajor = false, GdnKernelTimer *timer = nullptr)
 {
     if constexpr (VDim == 256) {
         RunRecompute<kType, betaType, VDim,
                      GDN::RecomputeWUFwdTileShapes256<kType, betaType>, kAbcTaskOrder>(
-            k, v, beta, A, g, cuSeqlens, chunkIndices, w, u, workspace, tiling, taskRange, inputSequenceMajor);
+            k, v, beta, A, g, cuSeqlens, chunkIndices, w, u, workspace, tiling, taskRange, inputSequenceMajor, timer);
     } else {
         RunRecompute<kType, betaType, VDim,
                      GDN::RecomputeWUFwdTileShapes128<kType, betaType>, kAbcTaskOrder>(
-            k, v, beta, A, g, cuSeqlens, chunkIndices, w, u, workspace, tiling, taskRange, inputSequenceMajor);
+            k, v, beta, A, g, cuSeqlens, chunkIndices, w, u, workspace, tiling, taskRange, inputSequenceMajor, timer);
     }
 }
 
@@ -295,29 +300,29 @@ __aicore__ inline void DispatchFwdO(GM_ADDR q, GM_ADDR k, GM_ADDR vNew, GM_ADDR 
                                     GM_ADDR cuSeqlens, GM_ADDR chunkIndices, GM_ADDR o,
                                     GM_ADDR userWorkspace, const GdnMegaArch22FwdOTilingData *tiling,
                                     const GdnHoPipeline::HoPipelineConfig *idleConfig = nullptr,
-                                    GM_ADDR hoReadyAddr = nullptr, bool inputSequenceMajor = false, bool outputSequenceMajor = false)
+                                    GM_ADDR hoReadyAddr = nullptr, bool inputSequenceMajor = false, bool outputSequenceMajor = false, GdnKernelTimer *timer = nullptr)
 {
     RunFwdO<InputT, float>(q, k, vNew, h, g, cuSeqlens, chunkIndices, o, userWorkspace, tiling,
-                           idleConfig, hoReadyAddr, inputSequenceMajor, outputSequenceMajor);
+                           idleConfig, hoReadyAddr, inputSequenceMajor, outputSequenceMajor, timer);
 }
 
 #ifndef GDN_CHUNK_RECOMPUTE_WU_FWD_HO_IMPL_ONLY
 __aicore__ inline void DispatchFwdO(GM_ADDR q, GM_ADDR k, GM_ADDR vNew, GM_ADDR h, GM_ADDR g,
                                     GM_ADDR cuSeqlens, GM_ADDR chunkIndices, GM_ADDR o,
-                                    GM_ADDR userWorkspace, const GdnMegaArch22FwdOTilingData *tiling)
+                                    GM_ADDR userWorkspace, const GdnMegaArch22FwdOTilingData *tiling, GdnKernelTimer *timer = nullptr)
 {
     if (tiling->dataType == 1) {
         if (tiling->gDataType == 2) {
             RunFwdO<bfloat16_t, float>(q, k, vNew, h, g, cuSeqlens, chunkIndices, o,
-                                       userWorkspace, tiling);
+                                       userWorkspace, tiling, nullptr, nullptr, false, false, timer);
         } else {
             RunFwdO<bfloat16_t, bfloat16_t>(q, k, vNew, h, g, cuSeqlens, chunkIndices, o,
-                                            userWorkspace, tiling);
+                                            userWorkspace, tiling, nullptr, nullptr, false, false, timer);
         }
     } else if (tiling->gDataType == 2) {
-        RunFwdO<half, float>(q, k, vNew, h, g, cuSeqlens, chunkIndices, o, userWorkspace, tiling);
+        RunFwdO<half, float>(q, k, vNew, h, g, cuSeqlens, chunkIndices, o, userWorkspace, tiling, nullptr, nullptr, false, false, timer);
     } else {
-        RunFwdO<half, half>(q, k, vNew, h, g, cuSeqlens, chunkIndices, o, userWorkspace, tiling);
+        RunFwdO<half, half>(q, k, vNew, h, g, cuSeqlens, chunkIndices, o, userWorkspace, tiling, nullptr, nullptr, false, false, timer);
     }
 }
 

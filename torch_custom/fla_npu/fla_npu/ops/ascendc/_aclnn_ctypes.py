@@ -560,6 +560,14 @@ _GET_WORKSPACE_ARGTYPES = {
 }
 
 
+# Independent diagnostic ABI: append timer immediately before workspace/executor.
+_GET_WORKSPACE_ARGTYPES["aclnnChunkGatedDeltaRuleFwdProfile"] = (
+    _GET_WORKSPACE_ARGTYPES["aclnnChunkGatedDeltaRuleFwd"][:-2]
+    + [ctypes.c_void_p]
+    + _GET_WORKSPACE_ARGTYPES["aclnnChunkGatedDeltaRuleFwd"][-2:]
+)
+
+
 def _call_aclnn(
     name: str,
     build_args,
@@ -2934,6 +2942,72 @@ def npu_chunk_gated_delta_rule_fwd(
     layout="BNSD",
 ):
     """调用融合 GDN 前向；训练默认导出 gCumsum/A，推理显式设为 False。"""
+    return _chunk_gated_delta_rule_fwd_impl(
+        q, k, v, g, beta,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        chunk_size=chunk_size,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        scale=scale,
+        use_exp2=use_exp2,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        use_gate_in_kernel=use_gate_in_kernel,
+        use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+        allow_neg_eigval=allow_neg_eigval,
+        disable_recompute=disable_recompute,
+        return_intermediate_states=return_intermediate_states,
+        state_v_first=state_v_first,
+        a_log=a_log,
+        dt_bias=dt_bias,
+        layout=layout,
+    )
+
+
+def _profile_chunk_gated_delta_rule_fwd(q, k, v, g, beta, *, timer, **kwargs):
+    """Diagnostic ctypes entry, outside the stable schema; caller retains timer until synchronization."""
+    import torch
+
+    if timer is None or timer.dtype != torch.int64 or timer.ndim != 1 or not timer.is_contiguous():
+        raise ValueError("timer must be a contiguous rank-1 int64 tensor.")
+    if timer.device.type != "npu" or timer.device != q.device:
+        raise ValueError("timer must be on the same NPU as q.")
+    if getattr(timer, "requires_grad", False):
+        raise RuntimeError("profiling mutates timer storage; timer must not require gradients.")
+    outputs = _chunk_gated_delta_rule_fwd_impl(q, k, v, g, beta, _timer=timer, **kwargs)
+    # This private eager entry bypasses the facade's mutation wrapper.
+    # int64 tensors can still be saved by autograd, so expose the GM mutation.
+    torch.autograd.graph.increment_version((timer,))
+    return outputs
+
+
+def _chunk_gated_delta_rule_fwd_impl(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    *,
+    initial_state=None,
+    output_final_state=False,
+    chunk_size=64,
+    cu_seqlens=None,
+    chunk_indices=None,
+    scale=None,
+    use_exp2=False,
+    use_qk_l2norm_in_kernel=False,
+    use_gate_in_kernel=False,
+    use_beta_sigmoid_in_kernel=False,
+    allow_neg_eigval=False,
+    disable_recompute=True,
+    return_intermediate_states=False,
+    state_v_first=False,
+    a_log=None,
+    dt_bias=None,
+    layout="BNSD",
+    _timer=None,
+):
+    """调用融合 GDN 前向；训练默认导出 gCumsum/A，推理显式设为 False。"""
     import torch
 
     q_shape = _shape(q)
@@ -3047,9 +3121,8 @@ def npu_chunk_gated_delta_rule_fwd(
     q_rstd = _empty(norm_shape, q, dtype=torch.float32) if use_qk_l2norm_in_kernel else None
     k_rstd = _empty(norm_shape, k, dtype=torch.float32) if use_qk_l2norm_in_kernel else None
     outputs = (o, final_state, g_cumsum, A, beta_eff, h, q_hat, k_hat, q_rstd, k_rstd)
-    return _call_aclnn(
-        "aclnnChunkGatedDeltaRuleFwd",
-        lambda ctx: [
+    def build_args(ctx):
+        args = [
             ctx.tensor(q, "q"),
             ctx.tensor(k, "k"),
             ctx.tensor(v, "v"),
@@ -3077,9 +3150,13 @@ def npu_chunk_gated_delta_rule_fwd(
             ctx.tensor(g_cumsum, "g_cumsum"),
             ctx.tensor(A, "A"),
             ctx.tensor(h, "h"),
-        ],
-        outputs,
-    )
+        ]
+        if _timer is not None:
+            args.append(ctx.tensor(_timer, "timer"))
+        return args
+
+    name = "aclnnChunkGatedDeltaRuleFwdProfile" if _timer is not None else "aclnnChunkGatedDeltaRuleFwd"
+    return _call_aclnn(name, build_args, outputs)
 
 
 def npu_causal_conv1d_bwd(

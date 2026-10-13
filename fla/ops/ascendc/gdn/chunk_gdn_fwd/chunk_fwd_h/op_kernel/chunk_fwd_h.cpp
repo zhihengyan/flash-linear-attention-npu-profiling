@@ -4,6 +4,7 @@
  * the BSD 3-Clause License (the "License").
  */
 
+#include "kernel_utils/gdn_timer/AscendTimerV2_device.hpp"
 #include "chunk_fwd_h_tiling_key.h"
 #include "chunk_fwd_h_policy.h"
 
@@ -44,12 +45,13 @@ struct FwdHKernelTraits {
 };
 
 template <typename GateT, typename CompilePolicy, bool STATE_V_FIRST>
-__aicore__ inline void RunFwdHTyped(const FwdHKernelArgs &args)
+__aicore__ inline void RunFwdHTyped(const FwdHKernelArgs &args, GdnKernelTimer &timer)
 {
     if ASCEND_IS_AIC {
         const bool hasCubeWork = args.tiling.useInitialState || args.tiling.storeFinalState ||
             args.tiling.seqlen > static_cast<uint32_t>(FWD_H_CHUNK);
         if (!hasCubeWork) {
+            TIMER_BLOCK(timer.InitDone());
             return;
         }
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
@@ -59,6 +61,8 @@ __aicore__ inline void RunFwdHTyped(const FwdHKernelArgs &args)
         ChunkFwdHCubeArch22<CompilePolicy, STATE_V_FIRST> cube;
 #endif
         cube.Init(args);
+        TIMER_BLOCK(timer.InitDone());
+        TIMER_BLOCK(cube.SetTimerPtr(&timer));
         cube.Process();
     }
     if ASCEND_IS_AIV {
@@ -70,6 +74,8 @@ __aicore__ inline void RunFwdHTyped(const FwdHKernelArgs &args)
         ChunkFwdHVecArch22<GateT, CompilePolicy, STATE_V_FIRST> vec;
         vec.Init(args);
 #endif
+        TIMER_BLOCK(timer.InitDone());
+        TIMER_BLOCK(vec.SetTimerPtr(&timer));
         vec.Process();
     }
 }
@@ -81,10 +87,12 @@ template <int D_T_G, int V_DIM, bool USE_GK, bool USE_EXP2, bool STATE_FP32,
           bool STATE_V_FIRST>
 __global__ __aicore__ void chunk_fwd_h(
     GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk, GM_ADDR initial_state,
-    GM_ADDR cu_seqlens, GM_ADDR chunk_indices, GM_ADDR h, GM_ADDR v_new,
+    GM_ADDR cu_seqlens, GM_ADDR chunk_indices, GM_ADDR timerAddr, GM_ADDR h, GM_ADDR v_new,
     GM_ADDR final_state, GM_ADDR workspace, GM_ADDR tiling)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+    GdnKernelTimer timer;
+    TIMER_BLOCK(timer.Init(timerAddr, AscendTimer::FWD_H));
     GDN::FwdHKernelArgs args{};
     args.k = k;
     args.w = w;
@@ -119,6 +127,7 @@ __global__ __aicore__ void chunk_fwd_h(
     using Traits = GDN::FwdHKernelTraits<
         D_T_G, V_DIM, USE_GK, USE_EXP2, STATE_FP32, STATE_V_FIRST>;
     GDN::RunFwdHTyped<typename Traits::GateT, typename Traits::CompilePolicy,
-                      Traits::STATE_V_FIRST_VALUE>(args);
+                      Traits::STATE_V_FIRST_VALUE>(args, timer);
+    TIMER_BLOCK(timer.Finish());
 }
 #endif

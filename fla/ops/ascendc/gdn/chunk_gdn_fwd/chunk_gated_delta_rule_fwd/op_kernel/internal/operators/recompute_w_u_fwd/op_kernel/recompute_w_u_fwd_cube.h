@@ -1,3 +1,4 @@
+#include "kernel_utils/gdn_timer/AscendTimerV2_device.hpp"
 /**
  * Copyright (c) 2025 Tianjin University, Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
@@ -47,6 +48,8 @@ template <class BlockMmadU_, class BlockMmadW_, bool kFlattenHeadTasks_ = false,
           bool kCoefficientGenerationTaskOrder_ = false>
 class RecomputeWUFwdTla {
 public:
+    __aicore__ inline void SetTimerPtr(GdnKernelTimer *timer) { timer_ = timer; }
+
     using BlockMmadU = BlockMmadU_;
     using BlockMmadW = BlockMmadW_;
 
@@ -182,7 +185,10 @@ public:
                                     (h * params.T + bos) * params.chunkSize);
                 auto tensorA = tla::MakeTensor(gmA, params.layoutA, Arch::PositionGM{});
 
-                Arch::CrossCoreWaitFlag(flagAivVbReady);
+                {
+                    GDN_TIMER_SCOPE(timer_, WU_WAIT);
+                    Arch::CrossCoreWaitFlag(flagAivVbReady);
+                }
                 const uint32_t tileN = tla::get<1>(BdkL1TileShape{});
                 for (uint32_t nOffset = 0; nOffset < params.V; nOffset += tileN) {
                     const uint32_t curN =
@@ -203,10 +209,16 @@ public:
                     auto tensorBlockU = GetTile(
                         tensorU, tla::MakeCoord(0, 0),
                         tla::MakeShape(actualBlockShape.m(), actualBlockShape.n()));
-                    blockMmad(tensorBlockA, tensorBlockVb, tensorBlockU, actualBlockShape);
+                    {
+                        GDN_TIMER_SCOPE(timer_, U_MM);
+                        blockMmad(tensorBlockA, tensorBlockVb, tensorBlockU, actualBlockShape);
+                    }
                 }
 
-                Arch::CrossCoreWaitFlag(flagAivKbgExpReady);
+                {
+                    GDN_TIMER_SCOPE(timer_, WU_WAIT);
+                    Arch::CrossCoreWaitFlag(flagAivKbgExpReady);
+                }
                 GemmCoord actualBlockShape{
                     curChunkSize, static_cast<uint32_t>(params.K), curChunkSize};
                 gmKbgExp.SetGlobalBuffer((__gm__ ElementKbgExp *)params.ptrKbgExp +
@@ -225,7 +237,10 @@ public:
                 auto tensorBlockW = GetTile(
                     tensorW, tla::MakeCoord(0, 0),
                     tla::MakeShape(actualBlockShape.m(), actualBlockShape.n()));
-                blockMmad(tensorBlockA, tensorBlockKbgExp, tensorBlockW, actualBlockShape);
+                {
+                    GDN_TIMER_SCOPE(timer_, W_MM);
+                    blockMmad(tensorBlockA, tensorBlockKbgExp, tensorBlockW, actualBlockShape);
+                }
                 // Dependency chain inside BlockMmad is GM->L1 (MTE2), MTE2_MTE1 wait,
                 // then L1->L0 (MTE1). Issuing the free notification on PIPE_MTE1 here
                 // orders it after that final L1 read, which transitively proves the GM
@@ -294,7 +309,10 @@ public:
                         auto tensorBlockU = GetTile(tensorU, tla::MakeCoord(0, 0),
                                                      tla::MakeShape(actualBlockShape.m(), actualBlockShape.n()));
                         // Compute block-scoped matrix multiply-add
-                        BlockMmadU(tensorBlockA, tensorBlockVb, tensorBlockU, actualBlockShape);
+                        {
+                            GDN_TIMER_SCOPE(timer_, U_MM);
+                            BlockMmadU(tensorBlockA, tensorBlockVb, tensorBlockU, actualBlockShape);
+                        }
                     }
                 }
             }
@@ -348,12 +366,18 @@ public:
                     auto tensorBlockW = GetTile(tensorW, tla::MakeCoord(0, 0),
                                                   tla::MakeShape(actualBlockShape.m(), actualBlockShape.n()));
                     // Compute block-scoped matrix multiply-add
-                    BlockMmadW(tensorBlockA, tensorBlockKbgExp, tensorBlockW, actualBlockShape);
+                    {
+                        GDN_TIMER_SCOPE(timer_, W_MM);
+                        BlockMmadW(tensorBlockA, tensorBlockKbgExp, tensorBlockW, actualBlockShape);
+                    }
                 }
             }
         }
 #endif
     }
+
+private:
+    GdnKernelTimer *timer_ = nullptr;
 };
 } // namespace Catlass::Gemm::Kernel
 
@@ -364,6 +388,8 @@ template <typename kType, typename betaType, typename L1TileShape, typename L0Ti
           bool kFlattenHeadTasks = false, bool kCoefficientGenerationTaskOrder = false>
 class RecomputeWUFwdProcess {
 public:
+    __aicore__ inline void SetTimerPtr(GdnKernelTimer *timer) { timer_ = timer; }
+
     /** @brief constructor */
     __aicore__ inline RecomputeWUFwdProcess(GM_ADDR k_, GM_ADDR v_, GM_ADDR beta_, GM_ADDR A_, GM_ADDR g_, GM_ADDR cu_seqlens_,
                                                         GM_ADDR chunk_indices_, GM_ADDR w_, GM_ADDR u_,
@@ -393,6 +419,9 @@ private:
     GM_ADDR w;
     GM_ADDR u;
     GM_ADDR workspace;
+
+private:
+    GdnKernelTimer *timer_ = nullptr;
 };
 
 template <typename kType, typename betaType, typename L1TileShape, typename L0TileShape,
@@ -486,6 +515,7 @@ __aicore__ void inline RecomputeWUFwdProcess<kType, betaType, L1TileShape, L0Til
         BlockMmadU, BlockMmadW, kFlattenHeadTasks, kCoefficientGenerationTaskOrder>;
 
     MatmulKernel kernel;
+    TIMER_BLOCK(kernel.SetTimerPtr(timer_));
 
     GM_ADDR vb = workspace;
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310

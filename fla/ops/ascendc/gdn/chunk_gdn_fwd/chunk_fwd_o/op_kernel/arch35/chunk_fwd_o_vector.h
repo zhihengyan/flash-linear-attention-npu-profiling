@@ -1,3 +1,4 @@
+#include "kernel_utils/gdn_timer/AscendTimerV2_device.hpp"
 /**
  * Copyright (c) 2026 Tianjin University, Ltd.
  * BSD 3-Clause License.
@@ -244,6 +245,8 @@ __simd_vf__ inline void Stage5Fuse64VF(__ubuf__ bfloat16_t *oOutAddr, __ubuf__ f
 template <typename GT, bool UseExp2>
 class ChunkFwdOA5VectorProcess {
 public:
+    __aicore__ inline void SetTimerPtr(GdnKernelTimer *timer) { timer_ = timer; }
+
     using ArchTag = Catlass::Arch::Ascend950;
 
     static constexpr uint32_t BANK_COUNT_2 = CHUNK_FWD_O_STREAM_BANK_COUNT;
@@ -326,24 +329,33 @@ public:
                     LocalTensor<bfloat16_t> aPrimeBf16 =
                         ubBuf_.GetWithOffset<bfloat16_t>(matrixElems,
                                                          ChunkFwdOAPrimeBf16Offset(streamSlot_));
-                    Catlass::Arch::CrossCoreWaitFlag(cubeToVecFlag_);
+                    {
+                        GDN_TIMER_SCOPE(timer_, O_WAIT);
+                        Catlass::Arch::CrossCoreWaitFlag(cubeToVecFlag_);
+                    }
                     WaitFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot_]);
                     if (loc.chunkLen == bt) {
-                        AscendC::VF_CALL<Stage3Gate64VF<true>>(
-                            reinterpret_cast<__ubuf__ bfloat16_t *>(aPrimeBf16.GetPhyAddr()),
-                            reinterpret_cast<__ubuf__ float *>(oSPrime.GetPhyAddr()),
-                            reinterpret_cast<__ubuf__ float *>(aRaw.GetPhyAddr()),
-                            reinterpret_cast<__ubuf__ float *>(gateA.GetPhyAddr()),
-                            reinterpret_cast<__ubuf__ float *>(gateO.GetPhyAddr()),
-                            static_cast<uint16_t>(loc.chunkLen));
+                        {
+                            GDN_TIMER_SCOPE(timer_, O_MASK);
+                            AscendC::VF_CALL<Stage3Gate64VF<true>>(
+                                reinterpret_cast<__ubuf__ bfloat16_t *>(aPrimeBf16.GetPhyAddr()),
+                                reinterpret_cast<__ubuf__ float *>(oSPrime.GetPhyAddr()),
+                                reinterpret_cast<__ubuf__ float *>(aRaw.GetPhyAddr()),
+                                reinterpret_cast<__ubuf__ float *>(gateA.GetPhyAddr()),
+                                reinterpret_cast<__ubuf__ float *>(gateO.GetPhyAddr()),
+                                static_cast<uint16_t>(loc.chunkLen));
+                        }
                     } else {
-                        AscendC::VF_CALL<Stage3Gate64VF<false>>(
-                            reinterpret_cast<__ubuf__ bfloat16_t *>(aPrimeBf16.GetPhyAddr()),
-                            reinterpret_cast<__ubuf__ float *>(oSPrime.GetPhyAddr()),
-                            reinterpret_cast<__ubuf__ float *>(aRaw.GetPhyAddr()),
-                            reinterpret_cast<__ubuf__ float *>(gateA.GetPhyAddr()),
-                            reinterpret_cast<__ubuf__ float *>(gateO.GetPhyAddr()),
-                            static_cast<uint16_t>(loc.chunkLen));
+                        {
+                            GDN_TIMER_SCOPE(timer_, O_MASK);
+                            AscendC::VF_CALL<Stage3Gate64VF<false>>(
+                                reinterpret_cast<__ubuf__ bfloat16_t *>(aPrimeBf16.GetPhyAddr()),
+                                reinterpret_cast<__ubuf__ float *>(oSPrime.GetPhyAddr()),
+                                reinterpret_cast<__ubuf__ float *>(aRaw.GetPhyAddr()),
+                                reinterpret_cast<__ubuf__ float *>(gateA.GetPhyAddr()),
+                                reinterpret_cast<__ubuf__ float *>(gateO.GetPhyAddr()),
+                                static_cast<uint16_t>(loc.chunkLen));
+                        }
                     }
                     SetFlag<HardEvent::V_MTE3>(vToMte3Stream_[streamSlot_]);
                     WaitFlag<HardEvent::V_MTE3>(vToMte3Stream_[streamSlot_]);
@@ -364,7 +376,10 @@ public:
                     SetFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot_]);
                     streamSlot_ ^= 1U;
                 } else {
-                    Catlass::Arch::CrossCoreWaitFlag(cubeToVecFlag_);
+                    {
+                        GDN_TIMER_SCOPE(timer_, O_WAIT);
+                        Catlass::Arch::CrossCoreWaitFlag(cubeToVecFlag_);
+                    }
                 }
                 Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecToCubeFlag_);
             }
@@ -375,7 +390,10 @@ public:
             for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
                 const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
                 const int64_t hv = hvBase + headOffset;
-                Catlass::Arch::CrossCoreWaitFlag(cubeToVecFlag_);
+                {
+                    GDN_TIMER_SCOPE(timer_, O_WAIT);
+                    Catlass::Arch::CrossCoreWaitFlag(cubeToVecFlag_);
+                }
                 if (ownerSubBlock != subBlockIdx) {
                     continue;
                 }
@@ -388,11 +406,14 @@ public:
                     ubBuf_.GetWithOffset<bfloat16_t>(bt * vDim, ChunkFwdOOlOffset(streamSlot_));
                 WaitFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot_]);
                 PipeBarrier<PIPE_V>();
-                AscendC::VF_CALL<Stage5Fuse64VF>(
-                    reinterpret_cast<__ubuf__ bfloat16_t *>(oOut.GetPhyAddr()),
-                    reinterpret_cast<__ubuf__ float *>(oSPrime.GetPhyAddr()),
-                    reinterpret_cast<__ubuf__ float *>(oL.GetPhyAddr()), tiling_.scale,
-                    static_cast<uint16_t>(loc.chunkLen));
+                {
+                    GDN_TIMER_SCOPE(timer_, O_OUTPUT);
+                    AscendC::VF_CALL<Stage5Fuse64VF>(
+                        reinterpret_cast<__ubuf__ bfloat16_t *>(oOut.GetPhyAddr()),
+                        reinterpret_cast<__ubuf__ float *>(oSPrime.GetPhyAddr()),
+                        reinterpret_cast<__ubuf__ float *>(oL.GetPhyAddr()), tiling_.scale,
+                        static_cast<uint16_t>(loc.chunkLen));
+                }
                 SetFlag<HardEvent::V_MTE3>(vToMte3Event_[streamSlot_]);
                 WaitFlag<HardEvent::V_MTE3>(vToMte3Event_[streamSlot_]);
                 const int64_t oOffset = ChunkFwdOOOffset(tiling_, loc, hv);
@@ -440,6 +461,7 @@ public:
 
     __aicore__ inline void ComputeStage1Gate(const ChunkFwdOChunkLoc &loc, uint32_t localSlot, uint32_t streamSlot)
     {
+        GDN_TIMER_SCOPE(timer_, O_GATE);
         const uint32_t bt = static_cast<uint32_t>(CHUNK_FWD_O_A5_BT);
         const uint32_t gScratchOff = ChunkFwdOGScratchOffset(streamSlot);
 
@@ -494,6 +516,9 @@ private:
     TEventID vToMte3Event_[BANK_COUNT_2];
     Catlass::Arch::CrossCoreFlag vecToCubeFlag_{CHUNK_FWD_O_VEC_TO_CUBE_READY_FLAG};
     Catlass::Arch::CrossCoreFlag cubeToVecFlag_{CHUNK_FWD_O_CUBE_TO_VEC_READY_FLAG};
+
+private:
+    GdnKernelTimer *timer_ = nullptr;
 };
 
 } // namespace GDN

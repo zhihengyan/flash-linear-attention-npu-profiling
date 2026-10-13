@@ -46,6 +46,10 @@ public:
         this->Input("chunk_indices").ParamType(OPTIONAL).ValueDepend(OPTIONAL)
             .DataType(indexTypes).Format(formats).UnknownShapeFormat(formats).AutoContiguous();
 
+        // In-place diagnostic buffer; never materialize a contiguous copy.
+        this->Input("timer").ParamType(OPTIONAL).DataType(indexTypes).Format(formats)
+            .UnknownShapeFormat(formats);
+
         this->Output("g_out").ParamType(REQUIRED).DataType(fp32Types).Format(formats)
             .UnknownShapeFormat(formats);
         this->Output("w_out").ParamType(REQUIRED).DataType(dataTypes).Format(formats)

@@ -1,3 +1,4 @@
+#include "kernel_utils/gdn_timer/AscendTimerV2_device.hpp"
 /**
  * Copyright (c) 2025 Tianjin University, Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
@@ -46,6 +47,8 @@ template <class BlockMmadU_, class BlockMmadW_, bool kFlattenHeadTasks_ = false,
           bool kAbcTaskOrder_ = false>
 class RecomputeWUFwdTla {
 public:
+    __aicore__ inline void SetTimerPtr(GdnKernelTimer *timer) { timer_ = timer; }
+
     using BlockMmadU = BlockMmadU_;
     using BlockMmadW = BlockMmadW_;
 
@@ -192,7 +195,10 @@ public:
                         auto tensorBlockU = GetTile(tensorU, tla::MakeCoord(0, 0),
                                                      tla::MakeShape(actualBlockShape.m(), actualBlockShape.n()));
                         // Compute block-scoped matrix multiply-add
-                        BlockMmadU(tensorBlockA, tensorBlockVb, tensorBlockU, actualBlockShape);
+                        {
+                            GDN_TIMER_SCOPE(timer_, U_MM);
+                            BlockMmadU(tensorBlockA, tensorBlockVb, tensorBlockU, actualBlockShape);
+                        }
                     }
                 }
             }
@@ -259,12 +265,18 @@ public:
                     auto tensorBlockW = GetTile(tensorW, tla::MakeCoord(0, 0),
                                                   tla::MakeShape(actualBlockShape.m(), actualBlockShape.n()));
                     // Compute block-scoped matrix multiply-add
-                    BlockMmadW(tensorBlockA, tensorBlockKbgExp, tensorBlockW, actualBlockShape);
+                    {
+                        GDN_TIMER_SCOPE(timer_, W_MM);
+                        BlockMmadW(tensorBlockA, tensorBlockKbgExp, tensorBlockW, actualBlockShape);
+                    }
                 }
             }
         }
 
     }
+
+private:
+    GdnKernelTimer *timer_ = nullptr;
 };
 } // namespace Catlass::Gemm::Kernel
 
@@ -275,6 +287,8 @@ template <typename kType, typename betaType, typename L1TileShape, typename L0Ti
           bool kFlattenHeadTasks = false, bool kAbcTaskOrder = false>
 class RecomputeWUFwdProcess {
 public:
+    __aicore__ inline void SetTimerPtr(GdnKernelTimer *timer) { timer_ = timer; }
+
     /** @brief constructor */
     __aicore__ inline RecomputeWUFwdProcess(GM_ADDR k_, GM_ADDR v_, GM_ADDR beta_, GM_ADDR A_, GM_ADDR g_, GM_ADDR cu_seqlens_,
                                                         GM_ADDR chunk_indices_, GM_ADDR w_, GM_ADDR u_,
@@ -304,6 +318,9 @@ private:
     GM_ADDR w;
     GM_ADDR u;
     GM_ADDR workspace;
+
+private:
+    GdnKernelTimer *timer_ = nullptr;
 };
 
 template <typename kType, typename betaType, typename L1TileShape, typename L0TileShape,
@@ -387,6 +404,7 @@ __aicore__ void inline RecomputeWUFwdProcess<kType, betaType, L1TileShape, L0Til
         BlockMmadU, BlockMmadW, kFlattenHeadTasks, kAbcTaskOrder>;
 
     MatmulKernel kernel;
+    TIMER_BLOCK(kernel.SetTimerPtr(timer_));
 
     GM_ADDR vb = workspace;
     GM_ADDR kbgExp = taskRange == nullptr ? workspace :

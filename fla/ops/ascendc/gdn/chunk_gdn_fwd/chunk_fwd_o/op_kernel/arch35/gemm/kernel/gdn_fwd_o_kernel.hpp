@@ -1,3 +1,4 @@
+#include "kernel_utils/gdn_timer/AscendTimerV2_device.hpp"
 /**
  * Copyright (c) 2026 Tianjin University, Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
@@ -64,6 +65,8 @@ template<
 >
 class GDNFwdOKernel {
 public:
+    __aicore__ inline void SetTimerPtr(GdnKernelTimer *timer) { timer_ = timer; }
+
 
     using ArchTag = Arch::Ascend950;
     using GDNFwdOOffsets = Catlass::Gemm::Block::GDNFwdOOffsets;
@@ -314,7 +317,10 @@ public:
                     auto tensorBlockK = GetTile(tensorK, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.k(), cube1Shape.n()));
                     auto tensorBlockAttn = GetTile(tensorAttn, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.m(), cube1Shape.n()));
                     blockMmadQK.preSetFlags();
-                    blockMmadQK(tensorBlockQ, tensorBlockK, tensorBlockAttn, cube1Shape);
+                    {
+                        GDN_TIMER_SCOPE(timer_, O_QK);
+                        blockMmadQK(tensorBlockQ, tensorBlockK, tensorBlockAttn, cube1Shape);
+                    }
                     blockMmadQK.waitL1Drained();
                 }
 
@@ -424,18 +430,30 @@ public:
                     if constexpr (cubeToUb128) {
                         if (cube2Offsets.vBlockDim <= 128) {
                             blockMmadQH128ToUB.preSetL0Flags();
-                            blockMmadQH128ToUB.executeCompute(tensorBlockHWorkUb, cube2Shape);
+                            {
+                                GDN_TIMER_SCOPE(timer_, O_QH);
+                                blockMmadQH128ToUB.executeCompute(tensorBlockHWorkUb, cube2Shape);
+                            }
                         } else {
                             blockMmadQH256.preSetL0Flags();
-                            blockMmadQH256.executeCompute(tensorBlockHWork, cube2Shape);
+                            {
+                                GDN_TIMER_SCOPE(timer_, O_QH);
+                                blockMmadQH256.executeCompute(tensorBlockHWork, cube2Shape);
+                            }
                         }
                     } else {
                         if (cube2Offsets.vBlockDim <= 128) {
                             blockMmadQH128.preSetL0Flags();
-                            blockMmadQH128.executeCompute(tensorBlockHWork, cube2Shape);
+                            {
+                                GDN_TIMER_SCOPE(timer_, O_QH);
+                                blockMmadQH128.executeCompute(tensorBlockHWork, cube2Shape);
+                            }
                         } else {
                             blockMmadQH256.preSetL0Flags();
-                            blockMmadQH256.executeCompute(tensorBlockHWork, cube2Shape);
+                            {
+                                GDN_TIMER_SCOPE(timer_, O_QH);
+                                blockMmadQH256.executeCompute(tensorBlockHWork, cube2Shape);
+                            }
                         }
                     }
                     // Cube3: acquire AttnMasked (L1A) — depends on vec1Done.
@@ -477,21 +495,33 @@ public:
                     if constexpr (cubeToUb128) {
                         if (cube3Offsets.vBlockDim <= 128) {
                             blockMmadAttenVNEW128ToUB.preSetL0Flags();
-                            blockMmadAttenVNEW128ToUB.executeCompute(tensorBlockVWorkUb, cube3Shape);
+                            {
+                                GDN_TIMER_SCOPE(timer_, O_ATTN_V);
+                                blockMmadAttenVNEW128ToUB.executeCompute(tensorBlockVWorkUb, cube3Shape);
+                            }
                             blockMmadAttenVNEW128ToUB.finalWaitFlags();
                         } else {
                             blockMmadAttenVNEW256.preSetL0Flags();
-                            blockMmadAttenVNEW256.executeCompute(tensorBlockVWork, cube3Shape);
+                            {
+                                GDN_TIMER_SCOPE(timer_, O_ATTN_V);
+                                blockMmadAttenVNEW256.executeCompute(tensorBlockVWork, cube3Shape);
+                            }
                             blockMmadAttenVNEW256.finalWaitFlags();
                         }
                     } else {
                         if (cube3Offsets.vBlockDim <= 128) {
                             blockMmadAttenVNEW128.preSetL0Flags();
-                            blockMmadAttenVNEW128.executeCompute(tensorBlockVWork, cube3Shape);
+                            {
+                                GDN_TIMER_SCOPE(timer_, O_ATTN_V);
+                                blockMmadAttenVNEW128.executeCompute(tensorBlockVWork, cube3Shape);
+                            }
                             blockMmadAttenVNEW128.finalWaitFlags();
                         } else {
                             blockMmadAttenVNEW256.preSetL0Flags();
-                            blockMmadAttenVNEW256.executeCompute(tensorBlockVWork, cube3Shape);
+                            {
+                                GDN_TIMER_SCOPE(timer_, O_ATTN_V);
+                                blockMmadAttenVNEW256.executeCompute(tensorBlockVWork, cube3Shape);
+                            }
                             blockMmadAttenVNEW256.finalWaitFlags();
                         }
                     }
@@ -569,12 +599,15 @@ public:
                         Arch::CrossCoreWaitFlag(vecBlockScheduler.l1SlotConsumed[streamId]);
                         epilogueGDNFwdOQkmask.EnableL1Output(l1AttenMaskWorkspace[streamId]);
                     }
-                    epilogueGDNFwdOQkmask(
-                        gmAftermaskWorkspace[vec1OffsetAttnMask],
-                        gmG[vec1OffsetG], gmAttnWorkspace[vec1OffsetAttn], gmMask,
-                        chunkSize, vec1Offsets.blockTokens, kHeadDim, vHeadDim, pingpongFlag, vec1Offsets.batchIdx, vec1Offsets.headIdx, vec1Offsets.chunkIdx,
-                        &vecBlockScheduler.cube1Done[streamId]
-                    );
+                    {
+                        GDN_TIMER_SCOPE(timer_, O_MASK);
+                        epilogueGDNFwdOQkmask(
+                            gmAftermaskWorkspace[vec1OffsetAttnMask],
+                            gmG[vec1OffsetG], gmAttnWorkspace[vec1OffsetAttn], gmMask,
+                            chunkSize, vec1Offsets.blockTokens, kHeadDim, vHeadDim, pingpongFlag, vec1Offsets.batchIdx, vec1Offsets.headIdx, vec1Offsets.chunkIdx,
+                            &vecBlockScheduler.cube1Done[streamId]
+                        );
+                    }
                     if constexpr (ENABLE_UB2L1) {
                         // ub2l1: drain this AIV's MTE3 queue first so the SSBuffer write
                         // (CopyOutputToL1) has fully left the Vector core before the
@@ -602,14 +635,31 @@ public:
                                 (streamId == 0) ? UB_V_WORK_PING_OFFSET : UB_V_WORK_PONG_OFFSET);
                             auto ubHWork = resource.ubBuf.template GetBufferByByte<ElementOinter>(
                                 (streamId == 0) ? UB_H_WORK_PING_OFFSET : UB_H_WORK_PONG_OFFSET);
-                            epilogueGDNFwdOOutput(
-                                gmO[vec2OffsetO],
-                                gmG[vec2OffsetG], ubVWork, ubHWork,
-                                scale, vec2Offsets.blockTokens, kHeadDim, vec2Offsets.vBlockDim, vHeadDim, pingpongFlag, vec2Offsets.batchIdx, vec2Offsets.headIdx, vec2Offsets.chunkIdx,
-                                &vecBlockScheduler.cube3Done[streamId],
-                                &vecBlockScheduler.vec2Done[streamId]
-                            );
+                            {
+                                GDN_TIMER_SCOPE(timer_, O_OUTPUT);
+                                epilogueGDNFwdOOutput(
+                                    gmO[vec2OffsetO],
+                                    gmG[vec2OffsetG], ubVWork, ubHWork,
+                                    scale, vec2Offsets.blockTokens, kHeadDim, vec2Offsets.vBlockDim, vHeadDim, pingpongFlag, vec2Offsets.batchIdx, vec2Offsets.headIdx, vec2Offsets.chunkIdx,
+                                    &vecBlockScheduler.cube3Done[streamId],
+                                    &vecBlockScheduler.vec2Done[streamId]
+                                );
+                            }
                         } else {
+                            {
+                                GDN_TIMER_SCOPE(timer_, O_OUTPUT);
+                                epilogueGDNFwdOOutput(
+                                    gmO[vec2OffsetO],
+                                    gmG[vec2OffsetG], gmVWorkspace[vec2OffsetVWork], gmHWorkspace[vec2OffsetHWork],
+                                    scale, vec2Offsets.blockTokens, kHeadDim, vec2Offsets.vBlockDim, vHeadDim, pingpongFlag, vec2Offsets.batchIdx, vec2Offsets.headIdx, vec2Offsets.chunkIdx,
+                                    &vecBlockScheduler.cube3Done[streamId],
+                                    &vecBlockScheduler.vec2Done[streamId]
+                                );
+                            }
+                        }
+                    } else {
+                        {
+                            GDN_TIMER_SCOPE(timer_, O_OUTPUT);
                             epilogueGDNFwdOOutput(
                                 gmO[vec2OffsetO],
                                 gmG[vec2OffsetG], gmVWorkspace[vec2OffsetVWork], gmHWorkspace[vec2OffsetHWork],
@@ -618,14 +668,6 @@ public:
                                 &vecBlockScheduler.vec2Done[streamId]
                             );
                         }
-                    } else {
-                        epilogueGDNFwdOOutput(
-                            gmO[vec2OffsetO],
-                            gmG[vec2OffsetG], gmVWorkspace[vec2OffsetVWork], gmHWorkspace[vec2OffsetHWork],
-                            scale, vec2Offsets.blockTokens, kHeadDim, vec2Offsets.vBlockDim, vHeadDim, pingpongFlag, vec2Offsets.batchIdx, vec2Offsets.headIdx, vec2Offsets.chunkIdx,
-                            &vecBlockScheduler.cube3Done[streamId],
-                            &vecBlockScheduler.vec2Done[streamId]
-                        );
                     }
                 }
                 needRun = true;
@@ -633,6 +675,9 @@ public:
         }
     }
 
+
+private:
+    GdnKernelTimer *timer_ = nullptr;
 };
 
 }

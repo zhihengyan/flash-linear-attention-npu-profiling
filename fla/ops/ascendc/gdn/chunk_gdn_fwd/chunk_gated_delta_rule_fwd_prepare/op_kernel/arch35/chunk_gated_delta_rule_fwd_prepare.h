@@ -1,3 +1,4 @@
+#include "kernel_utils/gdn_timer/AscendTimerV2_device.hpp"
 /**
  * Copyright (c) 2026 Tianjin University, Ltd.
  * BSD 3-Clause License.
@@ -27,6 +28,8 @@ using namespace AscendC::MicroAPI;
 template <typename GateDtype, typename ALogDtype>
 class ChunkGatedDeltaRuleFwdPrepareKernel : public PrepareState {
 public:
+    __aicore__ inline void SetTimerPtr(GdnKernelTimer *timer) { timer_ = timer; }
+
     using InDtype = bfloat16_t;
 
     template <typename Td>
@@ -317,7 +320,10 @@ public:
     __aicore__ inline void Stage1_UploadK(const ChunkRange &chunk, int64_t hv, int64_t taskIdx)
     {
         if (!OwnsHk(hv)) {
-            WaitAicStage4Done(taskIdx);
+            {
+                GDN_TIMER_SCOPE(timer_, FRONT_WAIT);
+                WaitAicStage4Done(taskIdx);
+            }
             return;
         }
         const int64_t hk = hv / HRatio;
@@ -335,7 +341,10 @@ public:
             L2NormK128VF<InDtype>(ubK[db], ubKHat[db], ubKRstd[db], static_cast<uint32_t>(nValid), kGdnL2NormEps);
             SetFlag<HardEvent::V_MTE3>(kHeUb0);
             WaitFlag<HardEvent::V_MTE3>(kHeUb0);
-            WaitAicStage4Done(taskIdx);
+            {
+                GDN_TIMER_SCOPE(timer_, FRONT_WAIT);
+                WaitAicStage4Done(taskIdx);
+            }
             UploadBf16NdToL1(l1K, ubKHat[db], static_cast<uint32_t>(K));
             NotifyAicStage1Done(taskIdx);
             DataCopy(gmKHat[offQk], ubKHat[db], nElem);
@@ -352,7 +361,10 @@ public:
         } else {
             SetFlag<HardEvent::MTE2_MTE3>(kHeUb0);
             WaitFlag<HardEvent::MTE2_MTE3>(kHeUb0);
-            WaitAicStage4Done(taskIdx);
+            {
+                GDN_TIMER_SCOPE(timer_, FRONT_WAIT);
+                WaitAicStage4Done(taskIdx);
+            }
             UploadBf16NdToL1(l1K, ubK[db], static_cast<uint32_t>(K));
             NotifyAicStage1Done(taskIdx);
         }
@@ -407,14 +419,15 @@ public:
 
     __aicore__ inline void Stage1_OneTask(const ChunkRange &chunk, int64_t hv, int64_t taskIdx)
     {
-        const int32_t db = PingPongSlot(taskIdx);
-        if (db == 0) {
-            SetFlag<HardEvent::MTE3_MTE2>(kHeUb0);
-            WaitFlag<HardEvent::MTE3_MTE2>(kHeUb0);
-        }
-        Stage1_PadTailIfNeeded(chunk, hv, taskIdx);
-        Stage1_UploadK(chunk, hv, taskIdx);
-        Stage1_GateAndBeta(chunk, hv, taskIdx);
+        GDN_TIMER_SCOPE(timer_, PREPARE_NORM_GATE);
+            const int32_t db = PingPongSlot(taskIdx);
+            if (db == 0) {
+                SetFlag<HardEvent::MTE3_MTE2>(kHeUb0);
+                WaitFlag<HardEvent::MTE3_MTE2>(kHeUb0);
+            }
+            Stage1_PadTailIfNeeded(chunk, hv, taskIdx);
+            Stage1_UploadK(chunk, hv, taskIdx);
+            Stage1_GateAndBeta(chunk, hv, taskIdx);
     }
 
     // Stage2 helper: dualDstCtl splits M or N across the two AIVs; it does
@@ -465,22 +478,23 @@ public:
     // notified from ProcessAic.
     __aicore__ inline void Stage2_AicOne(int64_t taskIdx, int64_t nThis)
     {
-        const int32_t bt = static_cast<int32_t>(chunkSize);
-        const int32_t kk = static_cast<int32_t>(K);
-        const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
-        const int32_t db = PingPongSlot(taskIdx);
-        const bool shareBothAiv = (HRatio > 2) || (HRatio == 2 && nThis < kTasksPerRound);
-        WaitFlag<HardEvent::M_MTE1>(bank);
-        MatmulToL0C<InDtype>(l1KHat[taskIdx], l1KHat[taskIdx], l0A[bank], l0B[bank], l0CTask[bank], bt, bt, kk, true,
-                             false, false, bank);
-        SetFlag<HardEvent::M_FIX>(bank);
-        SetFlag<HardEvent::M_MTE1>(bank);
-        WaitFlag<HardEvent::M_FIX>(bank);
-        DumpKktToUb(l0CTask[bank], db, bank, bank, shareBothAiv);
-        SetFlag<HardEvent::FIX_M>(bank);
-        if (HRatio <= 1) {
-            NotifyAivKktDone(taskIdx);
-        }
+        GDN_TIMER_SCOPE(timer_, KKT_MM);
+            const int32_t bt = static_cast<int32_t>(chunkSize);
+            const int32_t kk = static_cast<int32_t>(K);
+            const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
+            const int32_t db = PingPongSlot(taskIdx);
+            const bool shareBothAiv = (HRatio > 2) || (HRatio == 2 && nThis < kTasksPerRound);
+            WaitFlag<HardEvent::M_MTE1>(bank);
+            MatmulToL0C<InDtype>(l1KHat[taskIdx], l1KHat[taskIdx], l0A[bank], l0B[bank], l0CTask[bank], bt, bt, kk, true,
+                                 false, false, bank);
+            SetFlag<HardEvent::M_FIX>(bank);
+            SetFlag<HardEvent::M_MTE1>(bank);
+            WaitFlag<HardEvent::M_FIX>(bank);
+            DumpKktToUb(l0CTask[bank], db, bank, bank, shareBothAiv);
+            SetFlag<HardEvent::FIX_M>(bank);
+            if (HRatio <= 1) {
+                NotifyAivKktDone(taskIdx);
+            }
     }
 
     // ========================= Stage 3 =========================
@@ -489,6 +503,7 @@ public:
     // After kkt: L = kkt ⊙ G, pack leaves (must see -L), -L UB→L1, VCS on V.
     __aicore__ inline void Stage3_PrepareGate(int64_t taskIdx)
     {
+        GDN_TIMER_SCOPE(timer_, PREPARE_KKT_GATE);
         const int32_t db = PingPongSlot(taskIdx);
         if (useExp2 != 0) {
             GateLowerLVF<true>(ubGPrime[db], ubBetaEff[db], ubLFull[db]);
@@ -500,21 +515,22 @@ public:
 
     __aicore__ inline void Stage3_AivOne(int64_t hv, int64_t taskIdx)
     {
-        WaitCubeKktDone(taskIdx);
-        const int32_t db = PingPongSlot(taskIdx);
-        const int32_t kktDb = PingPongSlot(OwnerTaskIdx(hv, taskIdx));
-        MulKktGateVF(ubKkt[kktDb], ubLFull[db]);
-        SetFlag<HardEvent::V_MTE3>(kHeUb0);
-        WaitFlag<HardEvent::V_MTE3>(kHeUb0);
-        PackDiagLeavesFromUb(ubLPacked[db], ubLFull[db]);
-        SetFlag<HardEvent::MTE3_V>(kHeS3Pack);
-        WaitFlag<HardEvent::MTE3_V>(kHeS3Pack);
-        UbNd64ToL1Nz8(l1NegL[taskIdx], ubLFull[db]);
-        MulReduceScatterVF32(ubResVcs[db], ubLPacked[db], ubResVcs[db], ubVcsIdx);
-        SetFlag<HardEvent::V_MTE3>(kHeUb0);
-        WaitFlag<HardEvent::V_MTE3>(kHeUb0);
-        UploadDiagLeavesToL1(l1LeafRight[taskIdx], l1LeafLeft[taskIdx], ubResVcs[db]);
-        NotifyAicStage3Done(taskIdx);
+        GDN_TIMER_SCOPE(timer_, KKT_EPILOGUE);
+            WaitCubeKktDone(taskIdx);
+            const int32_t db = PingPongSlot(taskIdx);
+            const int32_t kktDb = PingPongSlot(OwnerTaskIdx(hv, taskIdx));
+            MulKktGateVF(ubKkt[kktDb], ubLFull[db]);
+            SetFlag<HardEvent::V_MTE3>(kHeUb0);
+            WaitFlag<HardEvent::V_MTE3>(kHeUb0);
+            PackDiagLeavesFromUb(ubLPacked[db], ubLFull[db]);
+            SetFlag<HardEvent::MTE3_V>(kHeS3Pack);
+            WaitFlag<HardEvent::MTE3_V>(kHeS3Pack);
+            UbNd64ToL1Nz8(l1NegL[taskIdx], ubLFull[db]);
+            MulReduceScatterVF32(ubResVcs[db], ubLPacked[db], ubResVcs[db], ubVcsIdx);
+            SetFlag<HardEvent::V_MTE3>(kHeUb0);
+            WaitFlag<HardEvent::V_MTE3>(kHeUb0);
+            UploadDiagLeavesToL1(l1LeafRight[taskIdx], l1LeafLeft[taskIdx], ubResVcs[db]);
+            NotifyAicStage3Done(taskIdx);
     }
 
     // ========================= Stage 4 =========================
@@ -534,7 +550,10 @@ public:
         LoadL1NzToL0AB<float>(l1I, l1I, l0Af[0], l0Bf[0], bt, bt, bt, true, false, 0);
         for (int64_t t = 0; t < nThis; ++t) {
             const uint8_t bank = static_cast<uint8_t>(t & 1);
-            MmadL0ABToL0C<float>(l0Af[0], l0Bf[0], l0CTask[t], bt, bt, bt, true, bank);
+            {
+                GDN_TIMER_SCOPE(timer_, PREPARE_SOLVE_PREFILL);
+                MmadL0ABToL0C<float>(l0Af[0], l0Bf[0], l0CTask[t], bt, bt, bt, true, bank);
+            }
             SetFlag<HardEvent::M_FIX>(bank);
             WaitFlag<HardEvent::M_FIX>(bank);
             SetFlag<HardEvent::FIX_M>(bank);
@@ -544,26 +563,28 @@ public:
 
     __aicore__ inline void Stage4_AccIssue(int64_t taskIdx)
     {
-        const int32_t bt = static_cast<int32_t>(chunkSize);
-        const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
-        WaitFlag<HardEvent::M_MTE1>(bank);
-        MatmulToL0C<float>(l1LeafLeft[taskIdx], l1NegL[taskIdx], l0AfP[bank], l0BfP[bank], l0CTask[taskIdx], bt, bt, bt,
-                           false, true, true, bank);
-        SetFlag<HardEvent::M_FIX>(bank);
-        SetFlag<HardEvent::M_MTE1>(bank);
+        GDN_TIMER_SCOPE(timer_, PREPARE_SOLVE_ISSUE);
+            const int32_t bt = static_cast<int32_t>(chunkSize);
+            const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
+            WaitFlag<HardEvent::M_MTE1>(bank);
+            MatmulToL0C<float>(l1LeafLeft[taskIdx], l1NegL[taskIdx], l0AfP[bank], l0BfP[bank], l0CTask[taskIdx], bt, bt, bt,
+                               false, true, true, bank);
+            SetFlag<HardEvent::M_FIX>(bank);
+            SetFlag<HardEvent::M_MTE1>(bank);
     }
 
     __aicore__ inline void Stage4_Dump(int64_t taskIdx)
     {
-        const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
-        WaitFlag<HardEvent::M_FIX>(bank);
-        FixpipeL0cToGmNzCs(gmWsY[WsYOffset(taskIdx)], l0CTask[taskIdx], kChunk64);
-        SetFlag<HardEvent::FIX_M>(bank);
-        SetFlag<HardEvent::FIX_MTE2>(bank);
-        WaitFlag<HardEvent::FIX_MTE2>(bank);
-        CopyGmNzToL1Fp32(l1Y[taskIdx], gmWsY[WsYOffset(taskIdx)], kChunk64);
-        NotifyAivStage4Done(taskIdx);
-        SetFlag<HardEvent::MTE2_MTE1>(taskIdx);
+        GDN_TIMER_SCOPE(timer_, PREPARE_SOLVE_DUMP);
+            const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
+            WaitFlag<HardEvent::M_FIX>(bank);
+            FixpipeL0cToGmNzCs(gmWsY[WsYOffset(taskIdx)], l0CTask[taskIdx], kChunk64);
+            SetFlag<HardEvent::FIX_M>(bank);
+            SetFlag<HardEvent::FIX_MTE2>(bank);
+            WaitFlag<HardEvent::FIX_MTE2>(bank);
+            CopyGmNzToL1Fp32(l1Y[taskIdx], gmWsY[WsYOffset(taskIdx)], kChunk64);
+            NotifyAivStage4Done(taskIdx);
+            SetFlag<HardEvent::MTE2_MTE1>(taskIdx);
     }
 
     // ========================= Stage 5 =========================
@@ -574,16 +595,17 @@ public:
     // Tail or outputA=0: L0C→L1 NZ directly (padding rows stay in L0C).
     __aicore__ inline void Stage5_Compute(int64_t taskIdx)
     {
-        const int32_t bt = static_cast<int32_t>(chunkSize);
-        const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
-        WaitFlag<HardEvent::M_MTE1>(bank);
-        MatmulToL0C<float>(l1I, l1LeafLeft[taskIdx], l0Af[bank], l0Bf[bank], l0CTask[taskIdx], bt, bt, bt, true, false,
-                           false, bank);
-        SetFlag<HardEvent::FIX_M>(bank);
-        MatmulToL0C<float>(l1Y[taskIdx], l1LeafRight[taskIdx], l0AfP[bank], l0BfP[bank], l0CTask[taskIdx], bt, bt, bt,
-                           false, false, false, bank);
-        SetFlag<HardEvent::M_FIX>(bank);
-        SetFlag<HardEvent::M_MTE1>(bank);
+        GDN_TIMER_SCOPE(timer_, SOLVE);
+            const int32_t bt = static_cast<int32_t>(chunkSize);
+            const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
+            WaitFlag<HardEvent::M_MTE1>(bank);
+            MatmulToL0C<float>(l1I, l1LeafLeft[taskIdx], l0Af[bank], l0Bf[bank], l0CTask[taskIdx], bt, bt, bt, true, false,
+                               false, bank);
+            SetFlag<HardEvent::FIX_M>(bank);
+            MatmulToL0C<float>(l1Y[taskIdx], l1LeafRight[taskIdx], l0AfP[bank], l0BfP[bank], l0CTask[taskIdx], bt, bt, bt,
+                               false, false, false, bank);
+            SetFlag<HardEvent::M_FIX>(bank);
+            SetFlag<HardEvent::M_MTE1>(bank);
     }
 
     __aicore__ inline void DumpAL0cToL1(int64_t taskIdx, uint32_t n)
@@ -601,27 +623,28 @@ public:
 
     __aicore__ inline void Stage5_Dump(const ChunkRange &chunk, int64_t hv, int64_t taskIdx)
     {
-        const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
-        const uint32_t n = static_cast<uint32_t>(chunkSize);
-        const uint32_t m = static_cast<uint32_t>(chunk.M);
-        const int64_t offA = OffsetBHTD(chunk.batch, hv, chunk.tokenStart, HV, T, chunkSize);
-        WaitFlag<HardEvent::M_FIX>(bank);
-        if (outputA != 0) {
-            FixpipeL0cToGmNd<InDtype>(gmA[offA], l0CTask[taskIdx], m, n, n);
-            SetFlag<HardEvent::FIX_MTE2>(bank);
-            WaitFlag<HardEvent::FIX_MTE2>(bank);
-            if (m == n) {
-                CopyGmNdToL1Nz<InDtype>(l1A[taskIdx], gmA[offA], n, n);
-                SetFlag<HardEvent::MTE2_MTE1>(taskIdx);
+        GDN_TIMER_SCOPE(timer_, PREPARE_SOLVE_DUMP);
+            const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
+            const uint32_t n = static_cast<uint32_t>(chunkSize);
+            const uint32_t m = static_cast<uint32_t>(chunk.M);
+            const int64_t offA = OffsetBHTD(chunk.batch, hv, chunk.tokenStart, HV, T, chunkSize);
+            WaitFlag<HardEvent::M_FIX>(bank);
+            if (outputA != 0) {
+                FixpipeL0cToGmNd<InDtype>(gmA[offA], l0CTask[taskIdx], m, n, n);
+                SetFlag<HardEvent::FIX_MTE2>(bank);
+                WaitFlag<HardEvent::FIX_MTE2>(bank);
+                if (m == n) {
+                    CopyGmNdToL1Nz<InDtype>(l1A[taskIdx], gmA[offA], n, n);
+                    SetFlag<HardEvent::MTE2_MTE1>(taskIdx);
+                } else {
+                    DumpAL0cToL1(taskIdx, n);
+                    SetFlag<HardEvent::FIX_MTE1>(taskIdx);
+                }
             } else {
                 DumpAL0cToL1(taskIdx, n);
                 SetFlag<HardEvent::FIX_MTE1>(taskIdx);
             }
-        } else {
-            DumpAL0cToL1(taskIdx, n);
-            SetFlag<HardEvent::FIX_MTE1>(taskIdx);
-        }
-        SetFlag<HardEvent::FIX_M>(bank);
+            SetFlag<HardEvent::FIX_M>(bank);
     }
 
     // ========================= Stage 6 =========================
@@ -630,45 +653,46 @@ public:
     // Tail zero-fills UB then copies M rows.
     __aicore__ inline void Stage6_AivOne(const ChunkRange &chunk, int64_t hv, int64_t taskIdx)
     {
-        const int64_t hk = hv / HRatio;
-        const int64_t offK = OffsetBHTD(chunk.batch, hk, chunk.tokenStart, HK, T, K);
-        const int64_t offV = OffsetBHTD(chunk.batch, hv, chunk.tokenStart, HV, T, V);
-        const int32_t nValid = static_cast<int32_t>(chunk.M);
-        const int32_t nPad = static_cast<int32_t>(chunkSize);
-        const int32_t nK = nValid * static_cast<int32_t>(K);
-        const int32_t nV = nValid * static_cast<int32_t>(V);
-        const int32_t db = PingPongSlot(taskIdx);
-        LocalTensor<InDtype> ubKnd = ubS6K[db];
-        LocalTensor<InDtype> ubVnd = ubS6V[db];
-        LocalTensor<float> beta = ubBetaEff[db];
-        LocalTensor<float> g = ubGPrime[db];
-        if (nValid < nPad) {
-            SetFlag<HardEvent::MTE3_V>(kHeUb0);
-            WaitFlag<HardEvent::MTE3_V>(kHeUb0);
-            Duplicate(ubVnd, static_cast<InDtype>(0), nPad * static_cast<int32_t>(V));
-            Duplicate(ubKnd, static_cast<InDtype>(0), nPad * static_cast<int32_t>(K));
-            SetFlag<HardEvent::V_MTE2>(kHeUb0);
-            WaitFlag<HardEvent::V_MTE2>(kHeUb0);
-        }
-        DataCopy(ubVnd, gmV[offV], nV);
-        SetFlag<HardEvent::MTE2_V>(kHeUb0);
-        WaitFlag<HardEvent::MTE2_V>(kHeUb0);
-        ScaleRowsVF<InDtype>(ubVnd, ubVnd, beta, static_cast<uint32_t>(chunkSize), static_cast<uint32_t>(V));
-        SetFlag<HardEvent::V_MTE3>(kHeUb0);
-        WaitFlag<HardEvent::V_MTE3>(kHeUb0);
-        UploadBf16NdToL1(l1Vb[taskIdx], ubVnd, static_cast<uint32_t>(V));
+        GDN_TIMER_SCOPE(timer_, WU_PREPARE);
+            const int64_t hk = hv / HRatio;
+            const int64_t offK = OffsetBHTD(chunk.batch, hk, chunk.tokenStart, HK, T, K);
+            const int64_t offV = OffsetBHTD(chunk.batch, hv, chunk.tokenStart, HV, T, V);
+            const int32_t nValid = static_cast<int32_t>(chunk.M);
+            const int32_t nPad = static_cast<int32_t>(chunkSize);
+            const int32_t nK = nValid * static_cast<int32_t>(K);
+            const int32_t nV = nValid * static_cast<int32_t>(V);
+            const int32_t db = PingPongSlot(taskIdx);
+            LocalTensor<InDtype> ubKnd = ubS6K[db];
+            LocalTensor<InDtype> ubVnd = ubS6V[db];
+            LocalTensor<float> beta = ubBetaEff[db];
+            LocalTensor<float> g = ubGPrime[db];
+            if (nValid < nPad) {
+                SetFlag<HardEvent::MTE3_V>(kHeUb0);
+                WaitFlag<HardEvent::MTE3_V>(kHeUb0);
+                Duplicate(ubVnd, static_cast<InDtype>(0), nPad * static_cast<int32_t>(V));
+                Duplicate(ubKnd, static_cast<InDtype>(0), nPad * static_cast<int32_t>(K));
+                SetFlag<HardEvent::V_MTE2>(kHeUb0);
+                WaitFlag<HardEvent::V_MTE2>(kHeUb0);
+            }
+            DataCopy(ubVnd, gmV[offV], nV);
+            SetFlag<HardEvent::MTE2_V>(kHeUb0);
+            WaitFlag<HardEvent::MTE2_V>(kHeUb0);
+            ScaleRowsVF<InDtype>(ubVnd, ubVnd, beta, static_cast<uint32_t>(chunkSize), static_cast<uint32_t>(V));
+            SetFlag<HardEvent::V_MTE3>(kHeUb0);
+            WaitFlag<HardEvent::V_MTE3>(kHeUb0);
+            UploadBf16NdToL1(l1Vb[taskIdx], ubVnd, static_cast<uint32_t>(V));
 
-        DataCopy(ubKnd, gmKHat[offK], nK);
-        SetFlag<HardEvent::MTE2_V>(kHeUb1);
-        WaitFlag<HardEvent::MTE2_V>(kHeUb1);
-        if (useExp2 != 0) {
-            ScaleRowsBetaExp2gVF<InDtype, true>(ubKnd, ubKnd, beta, g, static_cast<uint32_t>(chunkSize));
-        } else {
-            ScaleRowsBetaExp2gVF<InDtype, false>(ubKnd, ubKnd, beta, g, static_cast<uint32_t>(chunkSize));
-        }
-        SetFlag<HardEvent::V_MTE3>(kHeUb1);
-        WaitFlag<HardEvent::V_MTE3>(kHeUb1);
-        UploadBf16NdToL1(l1Kbg[taskIdx], ubKnd, static_cast<uint32_t>(K));
+            DataCopy(ubKnd, gmKHat[offK], nK);
+            SetFlag<HardEvent::MTE2_V>(kHeUb1);
+            WaitFlag<HardEvent::MTE2_V>(kHeUb1);
+            if (useExp2 != 0) {
+                ScaleRowsBetaExp2gVF<InDtype, true>(ubKnd, ubKnd, beta, g, static_cast<uint32_t>(chunkSize));
+            } else {
+                ScaleRowsBetaExp2gVF<InDtype, false>(ubKnd, ubKnd, beta, g, static_cast<uint32_t>(chunkSize));
+            }
+            SetFlag<HardEvent::V_MTE3>(kHeUb1);
+            WaitFlag<HardEvent::V_MTE3>(kHeUb1);
+            UploadBf16NdToL1(l1Kbg[taskIdx], ubKnd, static_cast<uint32_t>(K));
     }
 
     // ========================= Stage 7 =========================
@@ -694,8 +718,11 @@ public:
         wuFixpipeParams.params.srcNdStride = 0;
         wuFixpipeParams.params.dstNdStride = 0;
         WaitFlag<HardEvent::M_MTE1>(0);
-        WuMatmulToL0C<InDtype>(l1A[taskIdx], l1Kbg[taskIdx], l0AS7[0], l0BS7[0], l0CS7[0], bt, static_cast<int32_t>(nK),
-                               bt, 0);
+        {
+            GDN_TIMER_SCOPE(timer_, W_MM);
+            WuMatmulToL0C<InDtype>(l1A[taskIdx], l1Kbg[taskIdx], l0AS7[0], l0BS7[0], l0CS7[0], bt, static_cast<int32_t>(nK),
+                                   bt, 0);
+        }
         SetFlag<HardEvent::M_FIX>(0);
         WaitFlag<HardEvent::M_FIX>(0);
         Fixpipe<InDtype, float, CFG_ROW_MAJOR_UB>(ubS7W[db], l0CS7[0], wuFixpipeParams);
@@ -705,8 +732,11 @@ public:
         wuFixpipeParams.nSize = kGdnHeadDimK;
         wuFixpipeParams.dstStride = nV;
         WaitFlag<HardEvent::M_MTE1>(1);
-        WuMatmulToL0C<InDtype>(l1A[taskIdx], l1Vb[taskIdx], l0AS7[1], l0BS7[1], l0CS7[1], bt,
-                               static_cast<int32_t>(kGdnHeadDimK), bt, 1);
+        {
+            GDN_TIMER_SCOPE(timer_, U_MM);
+            WuMatmulToL0C<InDtype>(l1A[taskIdx], l1Vb[taskIdx], l0AS7[1], l0BS7[1], l0CS7[1], bt,
+                                   static_cast<int32_t>(kGdnHeadDimK), bt, 1);
+        }
         SetFlag<HardEvent::M_FIX>(1);
         SetFlag<HardEvent::M_MTE1>(1);
         WaitFlag<HardEvent::M_FIX>(1);
@@ -720,8 +750,11 @@ public:
             WaitFlag<HardEvent::FIX_MTE2>(1);
             SetFlag<HardEvent::FIX_M>(1);
             WaitFlag<HardEvent::M_MTE1>(1);
-            WuMatmulToL0C<InDtype>(l1A[taskIdx], l1Vb1[taskIdx], l0AS7[1], l0BS7[1], l0CS7[1], bt,
-                                   static_cast<int32_t>(kGdnHeadDimK), bt, 1);
+            {
+                GDN_TIMER_SCOPE(timer_, U_MM);
+                WuMatmulToL0C<InDtype>(l1A[taskIdx], l1Vb1[taskIdx], l0AS7[1], l0BS7[1], l0CS7[1], bt,
+                                       static_cast<int32_t>(kGdnHeadDimK), bt, 1);
+            }
             SetFlag<HardEvent::M_FIX>(1);
             SetFlag<HardEvent::M_MTE1>(1);
             WaitFlag<HardEvent::M_FIX>(1);
@@ -786,7 +819,10 @@ public:
             }
             if (pack != coreIdx) {
                 if (PackHasTail(cur) || PackHasTail(prev)) {
-                    WaitAicStage7Done();
+                    {
+                        GDN_TIMER_SCOPE(timer_, FRONT_WAIT);
+                        WaitAicStage7Done();
+                    }
                 }
             }
             for (int64_t t = subBlock; t < cur.nThis; t += 2) {
@@ -820,7 +856,10 @@ public:
         if (coreIdx < nPacks) {
             const int64_t pack = coreIdx + (nPacks - 1 - coreIdx) / numCore * numCore;
             const PackWalk last = MakePackWalk(pack, packSize);
-            WaitAicStage7Done();
+            {
+                GDN_TIMER_SCOPE(timer_, FRONT_WAIT);
+                WaitAicStage7Done();
+            }
             DrainPackWuToGm(last.base, last.nThis);
         }
     }
@@ -844,7 +883,10 @@ public:
                 if (!OwnsHk(PackWorkId(cur.base, cur.nThis, t) % HV)) {
                     continue;
                 }
-                WaitAivStage1Done(t);
+                {
+                    GDN_TIMER_SCOPE(timer_, FRONT_WAIT);
+                    WaitAivStage1Done(t);
+                }
                 Stage2_AicOne(t, cur.nThis);
                 if (HRatio > 1) {
                     NotifyKktSiblings(cur.base, cur.nThis, t);
@@ -852,10 +894,16 @@ public:
             }
             Stage4_PrefillI(cur.nThis);
             if (cur.nThis > 0) {
-                WaitAivStage3Done(0);
+                {
+                    GDN_TIMER_SCOPE(timer_, FRONT_WAIT);
+                    WaitAivStage3Done(0);
+                }
                 Stage4_AccIssue(0);
                 for (int64_t t = 1; t < cur.nThis; ++t) {
-                    WaitAivStage3Done(t);
+                    {
+                        GDN_TIMER_SCOPE(timer_, FRONT_WAIT);
+                        WaitAivStage3Done(t);
+                    }
                     Stage4_AccIssue(t);
                     Stage4_Dump(t - 1);
                 }
@@ -872,7 +920,10 @@ public:
                 }
             }
             for (int64_t t = 0; t < cur.nThis; ++t) {
-                WaitAivStage6Done(t);
+                {
+                    GDN_TIMER_SCOPE(timer_, FRONT_WAIT);
+                    WaitAivStage6Done(t);
+                }
                 ChunkRange chunk;
                 int64_t hv;
                 DecodeTask(cur.base, cur.nThis, t, chunk, hv);
@@ -959,6 +1010,9 @@ private:
     LocalTensor<float> l0CTask[4];
 
     int64_t hasBetaOut;
+
+private:
+    GdnKernelTimer *timer_ = nullptr;
 };
 
 } // namespace ChunkGatedDeltaRuleFwdPrepare

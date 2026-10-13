@@ -1,3 +1,4 @@
+#include "kernel_utils/gdn_timer/AscendTimerV2_device.hpp"
 /**
  * Copyright (c) 2026 Tianjin University, Ltd.
  * BSD 3-Clause License.
@@ -31,6 +32,8 @@ using namespace AscendC;
 
 class ChunkFwdOA5CubeProcess {
 public:
+    __aicore__ inline void SetTimerPtr(GdnKernelTimer *timer) { timer_ = timer; }
+
     using ArchTag = Catlass::Arch::Ascend950;
     using Element = bfloat16_t;
     using LayoutRM = Catlass::layout::RowMajor;
@@ -163,7 +166,10 @@ public:
                     }
 
                     const uint32_t computeHead = loadHead - 1U;
-                    Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
+                    {
+                        GDN_TIMER_SCOPE(timer_, O_WAIT);
+                        Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
+                    }
                     const uint32_t ownerSubBlock = computeHead % 2U;
                     const uint32_t localSlot = computeHead / 2U;
                     ProcessStage4Head(loc, ownerSubBlock, localSlot,
@@ -172,7 +178,10 @@ public:
 
                 if (stage4TaskCount > 0U) {
                     const uint32_t computeHead = stage4TaskCount - 1U;
-                    Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
+                    {
+                        GDN_TIMER_SCOPE(timer_, O_WAIT);
+                        Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
+                    }
                     const uint32_t ownerSubBlock = computeHead % 2U;
                     const uint32_t localSlot = computeHead / 2U;
                     ProcessStage4Head(loc, ownerSubBlock, localSlot, computeHead);
@@ -182,7 +191,10 @@ public:
         }
         if ASCEND_IS_AIC {
             if (stage5GroupPending) {
-                Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
+                {
+                    GDN_TIMER_SCOPE(timer_, O_WAIT);
+                    Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
+                }
             }
             for (uint32_t eventIdx = 0; eventIdx < kL1EventCount; ++eventIdx) {
                 WaitFlag<HardEvent::MTE1_MTE2>(L1Event(eventIdx));
@@ -263,7 +275,10 @@ private:
             CopyL1ToL0B{}(tileL0B, tileL1V);
             SetFlag<HardEvent::MTE1_M>(avCSlot);
             WaitFlag<HardEvent::MTE1_M>(avCSlot);
-            TileMmad{}(tileL0C, tileL0A, tileL0B, kBt, kV, kBt, true, 0);
+            {
+                GDN_TIMER_SCOPE(timer_, O_ATTN_V);
+                TileMmad{}(tileL0C, tileL0A, tileL0B, kBt, kV, kBt, true, 0);
+            }
         } else {
             auto layoutL0A = tla::MakeLayout<Element, LayoutTagL0A>(mActual, mActual);
             auto layoutL0B = tla::MakeLayout<Element, LayoutTagL0B>(mActual, kV);
@@ -279,7 +294,10 @@ private:
             CopyL1ToL0B{}(tileL0B, tileL1V);
             SetFlag<HardEvent::MTE1_M>(avCSlot);
             WaitFlag<HardEvent::MTE1_M>(avCSlot);
-            TileMmad{}(tensorL0C, tensorL0A, tensorL0B, true, 0);
+            {
+                GDN_TIMER_SCOPE(timer_, O_ATTN_V);
+                TileMmad{}(tensorL0C, tensorL0A, tensorL0B, true, 0);
+            }
         }
         PipeBarrier<PIPE_M>();
         SetFlag<HardEvent::M_MTE1>(L0AEvent(avASlot));
@@ -364,7 +382,10 @@ private:
         // Let the next task's independent Q/K/H transfers overlap the previous
         // task's Stage 5. Consume the ordered group token before touching L0/UB.
         if (waitPreviousStage5) {
-            Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
+            {
+                GDN_TIMER_SCOPE(timer_, O_WAIT);
+                Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
+            }
         }
 
         if (loadQK) {
@@ -417,7 +438,10 @@ private:
         CopyQkL1ToL0B{}(tileQktL0B, tileL1K);
         SetFlag<HardEvent::MTE1_M>(qktCSlot);
         WaitFlag<HardEvent::MTE1_M>(qktCSlot);
-        QkTileMmad{}(tileQktL0C, tileQktL0A, tileQktL0B, m, m, kK, true, 0);
+        {
+            GDN_TIMER_SCOPE(timer_, O_QK);
+            QkTileMmad{}(tileQktL0C, tileQktL0A, tileQktL0B, m, m, kK, true, 0);
+        }
         SetFlag<HardEvent::M_MTE1>(L0AEvent(qktASlot));
         SetFlag<HardEvent::M_MTE1>(L0BEvent(qktBSlot));
 
@@ -480,7 +504,10 @@ private:
         SetFlag<HardEvent::MTE1_M>(qhCSlot);
         WaitFlag<HardEvent::MTE1_M>(qhCSlot);
         SetFlag<HardEvent::MTE1_MTE2>(hEvent);
-        QhTileMmad{}(tileQhL0C, tileQhL0A, tileQhL0B, m, kV, kK, true, 0);
+        {
+            GDN_TIMER_SCOPE(timer_, O_QH);
+            QhTileMmad{}(tileQhL0C, tileQhL0A, tileQhL0B, m, kV, kK, true, 0);
+        }
 
         PipeBarrier<PIPE_M>();
         SetFlag<HardEvent::M_MTE1>(L0AEvent(qhASlot));
@@ -527,6 +554,9 @@ private:
     uint32_t l0ASlot_ = 0U;
     uint32_t l0BSlot_ = 0U;
     uint32_t l0CSlot_ = 0U;
+
+private:
+    GdnKernelTimer *timer_ = nullptr;
 };
 
 } // namespace GDN

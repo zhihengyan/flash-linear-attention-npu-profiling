@@ -151,3 +151,7 @@ print("FWD_DONE", flush=True)
 torch.npu.synchronize()
 print("BWD_DONE", flush=True)
 ```
+
+## 内核 profiling
+
+独立诊断入口覆盖 KKT、solve、W/U、H/O 的关键计算与已有等待，支持每核动态采样、CSV 和经时钟核实的 Perfetto 导出。参见 [运行步骤](docs/timer_run.md)、[原始流程与打点清单](docs/timer_flow.md)、[接入及验证状态](docs/timer_report.md)。原性能采集入口：`python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --device 0`（从仓库根目录执行）。
