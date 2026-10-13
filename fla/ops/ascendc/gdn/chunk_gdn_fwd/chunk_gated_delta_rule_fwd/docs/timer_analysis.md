@@ -2,6 +2,8 @@
 
 raw、完整 CSV、输入张量与 trace 留在原环境。先在内部汇总，再使用 brief.txt 里的计数、分位数与核编号讨论问题。汇总工具只读已解析 CSV 和 JSON 元数据，使用 Python 标准库；复制一个 summarize_timer.py 即可运行，不需要重编 kernel、安装 torch/CANN 或访问外网。
 
+已收到的设备摘要分析：[case 0（2026-10-13 整理）](timer_analysis_case0_2026-10-13.md)，包含原始 brief、源码对应关系、采样限制和下一步排查顺序。
+
 ## 生成小摘要
 
 RUN_DIR 指向主采集入口生成的 gdn_timer_<时间戳>_<标识> 目录。在仓库根目录运行：

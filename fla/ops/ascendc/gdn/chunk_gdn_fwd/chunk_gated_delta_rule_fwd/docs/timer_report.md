@@ -27,3 +27,11 @@
 ## 2026-10-13 内部分析工具
 
 新增 summarize_timer.py：直接从原 parsed.csv、timer_layout.json 和可选 capture_metadata.json 生成 brief.txt、summary.json、逐阶段/逐核表及长窗口表。等待比例采用本核等待窗口并集，不重复相加；实际次数与已采样次数分开记录，不外推截断样本。11 项小型合成数据测试通过，覆盖重叠等待、大整数 offset、截断、缺核/缺样本/重复/越界/不一致计数、未知验证状态及 CLI 产物/保留现有结果。未改 kernel、host 或采集输入；未使用真实设备数据，不能据此给出阶段耗时结论。操作和解释见 [timer_analysis.md](timer_analysis.md)。
+
+## 2026-10-13 用户提供的 case 0 设备摘要
+
+用户提供内部 Ascend950PR_957c 上 case 0 的单次 brief：CSV=passed、decode=complete、诊断与普通调用十项输出精确一致；实际采集为 PREPARE/FWD_H/FWD_O 三个 launch。原始摘要及分析留档于 [timer_analysis_case0_2026-10-13.md](timer_analysis_case0_2026-10-13.md)。这是新增的单 case 用户报告证据，上述 Windows 本地验证限制仍适用；未读取内部 raw、完整日志或构建版本，也未完成阶段 05 的全路径正式设备验收。
+
+这轮核总窗最长值比中位数高 0.65%～1.53%。Prepare 输入准备/KKT 后处理与 O 交接等待可作为后续排查候选；984 个计数项截断、H 动态采样覆盖较低及单次采集限制，使其尚不足以确认关键路径瓶颈或稳定性能回归。
+
+随后收到 case 0 的三个汇总 CSV 和 profiling.log：216 核行、27 阶段分组、31488 动态样本及 984 截断计数交叉一致，阶段与总窗 min/median/max 与日志一致。补充分析显示初始化已测窗口短、最长 SOLVE 样本集中在首个调用、O 等待普遍存在；首轮局部候选为 Prepare Stage6 K/V 搬运与处理重叠。未修改 kernel 或进行设备实验，普通调用的三个 launch 耗时仍未提供，不能确认最大收益方向。文件哈希、源码范围、候选风险及最小实验均补充到上述 case 0 分析文档。
