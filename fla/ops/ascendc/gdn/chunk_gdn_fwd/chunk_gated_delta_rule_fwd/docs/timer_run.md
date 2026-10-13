@@ -48,6 +48,87 @@ python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --dev
 
 核实 GetSystemCycle 频率和 AIC/AIV 共同时钟后，可在同一主入口追加 `--cycles-per-us 实际频率 --shared-clock`，生成 gdn_npu_time.json，使用 [Perfetto](https://ui.perfetto.dev/) 加载。默认只输出 cycles，不猜频率；各 kernel 独立原点，窗口可重叠。
 
+## Stage6 优化：先跑 B 与严格 A/B
+
+**先采一次 B 可以沿用上面的编译→安装→主入口流程。** A 是未优化版本（codex/gdn-profiling，实验起点 `809bce6887639e831caa856b8ac3a197a6a94294`），B 是 codex/gdn-stage6-overlap 的候选代码。每次运行主入口先采普通调用 msprof 性能，再用当次保存的同输入做 timer 诊断；主要收益比较取 run_metadata.json 中普通调用的 Task Duration(us)，不是 timer cycles。
+
+### 先跑优化后的 B1
+
+1. 在内部 Linux 仓库确认已同步本次 B 的代码和文档，再按前述环境步骤激活同一个 Python/ATK/CANN。检查 Prepare Arch35 的 Stage6 已有 prefetchK 条件。**当前本地 B 改动未提交；开始切换 A/B 前先把本轮改动提交在 B 分支并同步到内部仓库。** 仅切分支不能保证使用不同代码，未提交修改可能随切换保留；source_commit 也只记录 HEAD，不包含未提交 diff。
+2. 构建完整 B wheel，记录构建输出的准确路径，强制安装，并结束旧测试 Python 进程。沿用前述主入口的安装产物检查，不只检查 libcust_opapi.so；这次变更是 kernel，需确认 kernel .o 也来自 B。
+3. 先做改动路径的精度检查，再进行性能采集。完整设备验收见 [validation.md](validation.md)；可用原 Prepare 精度矩阵的 G2/V128 对齐和尾块作前置检查：
+
+```bash
+# 在 B 源码和准确安装的 B wheel 下，仓库根目录运行
+ATK_GM_INIT_MODE=off CASE_START=24 CASE_END=48 \
+  bash tests/atk/run_test_cpu.sh -op=chunk_gated_delta_rule_fwd_prepare -npu_device_id=0 -scope=accuracy -soc=ascend950
+ATK_GM_INIT_MODE=off CASE_START=216 CASE_END=240 \
+  bash tests/atk/run_test_cpu.sh -op=chunk_gated_delta_rule_fwd_prepare -npu_device_id=0 -scope=accuracy -soc=ascend950
+```
+
+这两个区间来自当前 Prepare README 的 24 组合法 flag 映射，CASE_END 不含右端；属于前置检查，不替代完整 Prepare/GDN 精度、MSS、确定性和 Example/ST。
+
+编译安装和 B1 采集命令如下。B_WHEEL 必须填写刚才构建输出的准确绝对路径：
+
+```bash
+git branch --show-current
+git rev-parse HEAD
+git status --short
+FLA_NPU_SOC=ascend950 FLA_NPU_OPS= python scripts/build_wheel.py
+
+# 将 B_WHEEL 设为本轮构建输出的准确 wheel 绝对路径
+python -m pip install --force-reinstall --no-cache-dir --no-deps "$B_WHEEL"
+
+python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py \
+  --device 0 --cases 0 --warmup 5 \
+  --output-dir tests/atk/chunk_gated_delta_rule_fwd/atk_output/ab_stage6/B1
+```
+
+`ab_stage6/B1` 在执行前必须不存在，不提前 mkdir 这个叶目录；脚本自行创建并拒绝覆盖旧结果。B2/B3 使用不同目录名。该命令的 warmup=5 只控制随后 timer 重放的预热，普通 ATK 性能的预热/次数配置继续沿用原入口，A/B 必须相同。
+
+主入口中的 `ten outputs exactly match uninstrumented call` 是 **B 普通调用与 B 诊断调用** 的一致性，不能替代 B 对 CPU golden 的精度检查，也不表示 B 与 A 的数值已经比较。若 B1 沿用未固定输入的原性能 JSON，它先作为新 B 采集，与历史 A0 比较只作为趋势参考。
+
+### 严格 A1→B1→A2 对照
+
+不要只将历史 A0 与新 B1 的均值相减就宣告收益。使用相同设备、Python/ATK/CANN、性能配置、用例和输入，重新运行 A1→B1→A2，并重复批次。为降低切换和构建缓存造成的混淆，每个阶段都确认源版本、重新构建和准确安装；A2 也重新构建/安装 A，不能只切 Git 分支。若复用旧 wheel，则需要同时使用与它对应的构建/归档产物进行安装检查，不能拿 A 的已安装 kernel 与 B 的 build staging 比较。
+
+当前主入口没有“从已有 case_0.pt 重放 ATK 普通性能”的参数；`profile_gdn.py --inputs` 仅重放普通/诊断对照和 timer，不生成原 ATK 普通性能报告。因此复现性能需要 ATK 自身固定输入。建议先从内部原始运行保存的 performance_cases.json 建立一个 A/B 共用的测试文件，保持原 shape、dtype、属性和值域；default_seed 已固定时保留，null 时为 case 0/1 选择一次固定整数，并在 A/B 中始终使用这一份配置。原 Prepare 冻结用例也使用 default_seed。
+
+下面仅改变随机种子和文件排版，不改变原用例其它内容。在 Linux 运行前，将 GDN_ORIGINAL_RUN 设为**内部完整原始运行目录**（包含 performance_cases.json），不是当前本机只含几个摘要的 atk_output 目录。共用文件保存于 checkout 外，切分支后重新复制到原入口读取的位置：
+
+```bash
+# GDN_ORIGINAL_RUN 指向内部原始完整运行；这里只准备一份固定配置
+python - "$GDN_ORIGINAL_RUN/performance_cases.json" /tmp/gdn_stage6_ab_cases.json <<'PY'
+import json, sys
+from pathlib import Path
+source, target = map(Path, sys.argv[1:])
+if target.exists():
+    raise SystemExit("共用配置已存在；复用原文件，不覆盖或重新选种子")
+cases = json.loads(source.read_text(encoding="utf-8-sig"))
+for case in cases:
+    if case.get("default_seed") is None:
+        case["default_seed"] = 20261013 + int(case["id"])
+target.write_text(json.dumps(cases, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+PY
+```
+
+依次执行以下三个阶段；**每次 switch 后**复制相同测试配置，执行前述完整构建、安装、精度检查和采集步骤。临时测试配置使 JSON 显示为未提交修改是预期的，kernel 源码必须已提交并且与选择的 A/B 一致。固定 seed 后的 A1 是新基线，不宣称它与历史 A0 的输入值相同。
+
+| 阶段 | 代码版本 | 主入口输出目录（必须新建） |
+| --- | --- | --- |
+| A1 | `809bce6887639e831caa856b8ac3a197a6a94294`；可用 `git switch --detach 809bce6887639e831caa856b8ac3a197a6a94294` 固定基线 | `atk_output/ab_stage6/A1` |
+| B1 | `git switch codex/gdn-stage6-overlap`，包含已提交候选 | `atk_output/ab_stage6/B1`；如果先跑 B 已用此名，改用 B2 |
+| A2 | 恢复同一固定 A commit | `atk_output/ab_stage6/A2` |
+
+```bash
+# 每次切换后、运行原采集入口前复制，共用文件不得变化
+cp /tmp/gdn_stage6_ab_cases.json tests/atk/chunk_gated_delta_rule_fwd/atk_chunk_gated_delta_rule_fwd_perf.json
+```
+
+比较前核对每轮 metadata 的 case_json_sha256、device、性能记录数量、source_commit 和已加载产物；A1/B1/A2 的配置哈希应一致，源码标识 A/B 应不同。脚本会重新保存 inputs/case_0.pt：输入文件 SHA256 相同即可证明文件一致；哈希不同时可能是序列化差异或输入变化，须在内部加载快照，逐项比较 q/k/v/g/beta、initial_state 和 kwargs 的 dtype、shape、值及选项，不能直接当相同输入。若固定 seed 后实际输入不一致，先修正输入冻结再比较性能。
+
+收益计算以每次普通调用七项 kernel Task Duration(us) 的时间和为主，分别保留 Prepare/H/O 分布。先检查 A1 与 A2 的波动，再判断 B 是否在多批次中稳定下降；不相加各项 p95，不用诊断窗口算收益。只传出 A1/B/A2 的 run_metadata.json 即可做首轮性能比较；B 的 brief/阶段表用于解释流水变化，raw 和大 CSV 留在内部。
+
 ## 可选重放与离线解析
 
 次入口为 `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut/profile_gdn.py`，只接受原 case 保存的输入或原 raw：

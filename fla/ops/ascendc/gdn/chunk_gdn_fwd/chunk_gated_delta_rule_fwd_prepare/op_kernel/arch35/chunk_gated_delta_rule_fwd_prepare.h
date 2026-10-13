@@ -666,6 +666,9 @@ public:
             LocalTensor<InDtype> ubVnd = ubS6V[db];
             LocalTensor<float> beta = ubBetaEff[db];
             LocalTensor<float> g = ubGPrime[db];
+            // Full GVA2 packs keep each K producer/consumer on the same AIV.
+            // Limit this first overlap candidate to their disjoint V128 banks.
+            const bool prefetchK = V == kGdnHeadDimK && HRatio == 2 && HV % kTasksPerRound == 0;
             if (nValid < nPad) {
                 SetFlag<HardEvent::MTE3_V>(kHeUb0);
                 WaitFlag<HardEvent::MTE3_V>(kHeUb0);
@@ -676,13 +679,19 @@ public:
             }
             DataCopy(ubVnd, gmV[offV], nV);
             SetFlag<HardEvent::MTE2_V>(kHeUb0);
+            // Publish V-ready before K so the V wait does not include K's copy.
+            if (prefetchK) {
+                DataCopy(ubKnd, gmKHat[offK], nK);
+            }
             WaitFlag<HardEvent::MTE2_V>(kHeUb0);
             ScaleRowsVF<InDtype>(ubVnd, ubVnd, beta, static_cast<uint32_t>(chunkSize), static_cast<uint32_t>(V));
             SetFlag<HardEvent::V_MTE3>(kHeUb0);
             WaitFlag<HardEvent::V_MTE3>(kHeUb0);
             UploadBf16NdToL1(l1Vb[taskIdx], ubVnd, static_cast<uint32_t>(V));
 
-            DataCopy(ubKnd, gmKHat[offK], nK);
+            if (!prefetchK) {
+                DataCopy(ubKnd, gmKHat[offK], nK);
+            }
             SetFlag<HardEvent::MTE2_V>(kHeUb1);
             WaitFlag<HardEvent::MTE2_V>(kHeUb1);
             if (useExp2 != 0) {

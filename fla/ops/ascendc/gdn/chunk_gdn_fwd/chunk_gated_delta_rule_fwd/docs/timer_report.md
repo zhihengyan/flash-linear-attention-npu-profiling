@@ -37,3 +37,9 @@
 随后收到 case 0 的三个汇总 CSV 和 profiling.log：216 核行、27 阶段分组、31488 动态样本及 984 截断计数交叉一致，阶段与总窗 min/median/max 与日志一致。补充分析显示初始化已测窗口短、最长 SOLVE 样本集中在首个调用、O 等待普遍存在；首轮局部候选为 Prepare Stage6 K/V 搬运与处理重叠。未修改 kernel 或进行设备实验，普通调用的三个 launch 耗时仍未提供，不能确认最大收益方向。文件哈希、源码范围、候选风险及最小实验均补充到上述 case 0 分析文档。
 
 第三轮收到 atk_output/run_metadata.json；用户将原 atk_output_timer_case0 目录重命名为 atk_output，四个原文件哈希不变。metadata 包含同一次普通 profiler 采集中的 Prepare/H/O 各 20 条记录，均值为 715.090/588.803/359.376 us；占七项 kernel 时间和均值的 41.86%/34.47%/21.04%。七项时间和均值为 1708.391 us，数据支持进入 Prepare Stage6 的首轮单变量 A/B，不需要再补缺失 H/O 行。source_commit 已提供，相关算子源码与分析时 HEAD 一致；采集用例 JSON 字节哈希与本地不同，A/B 沿用内部冻结用例/输入并核对版本。尚无优化后数据或收益结论，正式验收仍未完成。完整统计、数据身份限制和实验口径已追加到 case 0 分析文档。
+
+## 2026-10-13 Stage6 优化候选编码
+
+按用户授权，从 codex/gdn-profiling 的 `809bce6887639e831caa856b8ac3a197a6a94294` 新建 codex/gdn-stage6-overlap。Prepare Arch35 Stage6 在 V128/GVA2/Hv%4=0 的完整 pack 路径提前下发 K DataCopy，位置为 V-ready Set 之后、Wait 之前；其余组合保留原顺序。目标 case 0 满足该条件。现有 padding、向量数值运算、L1 上传、同步事件及 Stage4/5/7 编排沿用，仅为待设备选择的实验候选。
+
+25 项离线 timer 测试与 3 项 GDN 生产 wrapper 定向测试通过；以父分支为基点的源码/同步/声明检查通过，195 个 scope、28 动态类型、6 固定项保持，9 处后续行号已更新。默认旧 main 源码检查与完整 ABI 文本合同各有父分支已存在的问题，复现与具体限制记在 [validation.md](validation.md)。当前无 CANN/NPU，尚未构建、设备精度验收、MSS/确定性或 A/B 测量；不记录实际 overlap、采用结论或优化收益。设计与缓冲/同步证明见 [design.md](design.md)。
