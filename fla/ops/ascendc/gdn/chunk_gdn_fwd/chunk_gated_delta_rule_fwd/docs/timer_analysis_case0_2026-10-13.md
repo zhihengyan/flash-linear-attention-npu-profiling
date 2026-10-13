@@ -12,6 +12,27 @@
 
 限制主要来自采样：**984 个 kernel/core/stage 计数项截断，每项只保留前 32 次调用**。H 的已采样窗口并集中位覆盖率只有 AIC 1.57%、AIV 0.95%，不能据此认为 H 的计算很轻或其余时间在空闲。单次诊断采集也不能证明性能回归或优化收益。
 
+## Stage 编号和 A/B 的含义
+
+本文的 Stage4/5/6/7 沿用 **Prepare Arch35 kernel 内部的阶段编号**，属于 PREPARE 这一个 launch；它们不是公开 GDN 调用链的四个独立 launch。H/O 实现也有各自的阶段编号，阅读时以所属 kernel 为准。
+
+| Prepare 阶段 | 执行单元与操作 | 源码函数 | 对应 timer 名称 |
+| --- | --- | --- | --- |
+| Stage4 | AIC：三角求解的中间步骤。预填单位矩阵 I，计算 `Y = I + LeafLeft @ (-L)`，写出 Y 并搬回 L1，供 Stage5 使用 | Stage4_PrefillI、Stage4_AccIssue、Stage4_Dump | PREPARE_SOLVE_PREFILL、PREPARE_SOLVE_ISSUE、PREPARE_SOLVE_DUMP |
+| Stage5 | AIC：计算求解结果 `A = LeafLeft + Y @ LeafRight`，转换并保存 A，供 W/U 矩阵乘使用；按 outputA/tail 分支选择 GM/L1 写出路径 | Stage5_Compute、Stage5_Dump | SOLVE、PREPARE_SOLVE_DUMP |
+| Stage6 | AIV：把 V、K 从 GM 搬到 UB，按 beta/gate 缩放为 `Vb = V * beta_eff`、`Kbg = K_hat * beta_eff * E(g_prime)`，再转换布局并上传 L1；包含尾块处理及原事件等待 | Stage6_AivOne | WU_PREPARE |
+| Stage7 | AIC：执行 `W = A @ Kbg`、`U = A @ Vb`，经 Fixpipe 将结果送到配对 AIV 的 UB；随后由 AIV 的 DrainPackWuToGm 写回 GM | Stage7_AicOne；后续 DrainPackWuToGm | W_MM、U_MM；二者只覆盖其中的矩阵乘调用窗口 |
+
+这里 `@` 表示矩阵乘，I 为单位矩阵；L、LeafLeft、LeafRight 是前序 KKT/gate 和 Stage3 准备的求解矩阵。`g_prime` 是 chunk 内累加后的 gate，E 根据 useExp2 取 exp 或 exp2；K_hat 按配置为处理后的 K 或原 K。GM 是设备全局内存，UB 是向量侧片上缓冲，L1 是矩阵运算使用的片上存储。
+
+编号和公式可在 [Prepare Arch35 源码](../../chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h) 的 Stage 4～7 注释及函数中核对；总体调用链、打点名称和代码位置见 [timer_flow.md](timer_flow.md) 的“改造前执行流程”“原图节点与观测名称”和“逐点配对清单”。
+
+“Stage4/5/7 的已有重叠”指不同执行单元或不同 task 之间的流水重叠。Stage4/5 生成 A，Stage6 准备 Kbg/Vb；两路数据就绪后 Stage7 才能消费。同一 task 的 Stage7 仍须遵守这些依赖。Stage6 不需要等该 task 的 Stage5 完成，所以它的输入准备可与 Cube 求解重叠；处理不同 task 时，Stage6 也可能与 Stage7 交错。调整 Stage6 要保护这些既有关系。
+
+**本轮 A/B 就是修改前后对照实验：A 为当前未优化的普通调用，B 为仅包含 Stage6 候选改动的普通调用。** 使用同输入、同设备与软件环境、相同预热和采样次数，先验证精度，再比较 msprof Task Duration(us)。本轮主要看整个公开调用的七项 kernel 时间和，同时检查 Prepare 单项及 H/O 是否发生代价转移；不以诊断 scope 变短代替实际提速。
+
+建议 A→B→A 交替重复：最后恢复 A 是为了检查设备状态或测量条件的变化是否造成表面收益，不是第三个优化方案。第一轮只改变 K 输入搬运的下发位置，不同时修改求解公式、分核或其它流水；这样才能把收益或回退归因到这项改动。
+
 ## 采集条件与证据范围
 
 用户报告的运行命令，在仓库根目录执行：
