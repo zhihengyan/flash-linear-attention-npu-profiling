@@ -48,6 +48,8 @@ python torch_custom/fla_npu/test/test_aclnn_ctypes_abi.py AclnnCtypesAbiTest.tes
 
 先按 [timer_run.md](timer_run.md) 的已存在环境/构建/准确 wheel 安装流程切换父分支 A 与候选分支 B，确认实际加载版本。冻结内部 performance_cases.json 和输入快照，沿用原 ATK 环境及性能配置；不重生成随机输入替代本次快照。正常精度/性能调用关闭额外执行记录，不传 timer。
 
+2026-10-13 补充归档 wheel 复用：主入口新增 `--reference-wheel`，让每轮预检对照指定 wheel 的运行文件，不依赖最近一次 build staging；A/B 各构建一次后按 A1→B1→A2 强制安装，用同一份入口和冻结配置采集。metadata 中 reference_wheel.sha256 标识被测产物，source_commit_role=profiling_checkout 表明 source_commit 是入口工作区版本。这只改变测量前的产物校验，不改变 kernel、输入生成、标杆、容差或性能循环。新增 10 项离线合同覆盖 A/B kernel 区分、Python/配置混装、缺文件、额外 native 文件、非法归档和默认校验保留，与原 25 项合同一起运行，35 项全部通过；`--help` 入口及 diff 格式检查通过。设备切换安装/真实采集仍待内部验证。
+
 1. **Stage6 到整算子精度。** 独立 Prepare 对原 CPU golden 比较 W/U（以及 A、gate、hats/rstd 等既有输出），再跑 GDN 原双标杆入口与 Example/ST。数值序列未变，仍需在设备验证，不以源码分析替代。
 2. **候选与回退路径。** 使用原 Prepare 精简 162 条或完整 2416 条冻结矩阵：G2/V128/Hv%4=0 的对齐、尾块、varlen、L2Norm 开关、exp2 开关、beta/gate dtype、outputA 两态；以及 G1/3/4、V256、Hv 不满 pack。原精度基线/容差不修改。精简集只能作为前置验证，正式验收按 tests/atk/README.md。
 3. **复用与同步。** 覆盖同核至少连续多个 pack、db0/db1 切换、下一 pack 复用、尾任务与空闲核；按阶段 04 用独立测试记录确认实际任务/slot/ready/free 过程，记录不得增加同步。正常性能测试关闭该记录。本轮未新增或采集设备执行记录。
