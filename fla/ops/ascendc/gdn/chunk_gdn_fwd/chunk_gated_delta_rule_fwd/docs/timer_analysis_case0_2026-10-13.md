@@ -1,12 +1,14 @@
 # GDN case 0：内部设备 timer 摘要分析
 
-整理日期：2026-10-13。首轮基于用户提供的 `brief.txt`；第二轮读取用户拷出的 `core_summary.csv`、`longest_windows.csv`、`stage_summary.csv` 和 `profiling.log`，结合当前仓库的打点位置分析。未读取 raw、完整 parsed.csv、trace 或普通调用 msprof 报告。日期表示分析整理时间，构建版本未提供。
+整理日期：2026-10-13。首轮基于用户提供的 `brief.txt`；第二轮读取三个汇总 CSV 和 `profiling.log`；第三轮读取 `run_metadata.json` 中从普通调用 msprof 报告提取的 Task Duration(us)。未读取 raw、完整 parsed.csv、trace 或原始 op_summary 文件。数据目录已从 `atk_output_timer_case0` 重命名为 `atk_output`，原四个文件哈希保持一致。
 
 ## 当前结论
 
 本次实际采集到 **PREPARE → FWD_H → FWD_O** 三个 launch。各 launch、各核型的最长诊断总窗比中位数高 **0.65%～1.53%**，这一轮没有明显的核总窗长尾。下一步优先检查 Prepare 的 `WU_PREPARE`、`KKT_EPILOGUE`，以及 O 的 AIC/AIV 交接等待；这些是排查线索，尚不能确定关键路径瓶颈。
 
 第二轮数据进一步支持：**首轮局部实验可优先考虑 Prepare Stage6 的 K/V 搬运与处理流水**，保持原数值运算及数据就绪约束；这是按现有证据和改动范围选择的候选，尚未证明收益最大。初始化已测窗口很小，最长 SOLVE 窗口集中在每核首个调用，O 等待普遍存在，直接改分核、求解公式或删同步都缺少充分依据。详细证据和候选顺序见下文“第二轮：四个文件补充分析”。
+
+第三轮已取得 Prepare/H/O 各 20 条普通调用耗时记录：均值分别为 **715.090 / 588.803 / 359.376 us**，占同批七项 kernel 时间和均值的 **41.86% / 34.47% / 21.04%**。Prepare 是最大的单项，已有普通性能基线支持进入 Stage6 首轮单变量实验，不需要为了选择首个候选继续补相同的耗时摘要。20 条来自同一份采集，实际收益仍需同条件交替 A/B 复跑确认。
 
 限制主要来自采样：**984 个 kernel/core/stage 计数项截断，每项只保留前 32 次调用**。H 的已采样窗口并集中位覆盖率只有 AIC 1.57%、AIV 0.95%，不能据此认为 H 的计算很轻或其余时间在空闲。单次诊断采集也不能证明性能回归或优化收益。
 
@@ -31,9 +33,9 @@ python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --dev
 | initial_state | FP32，`[1,32,128,128]` |
 | 选项 | chunk_size=64，BNSD，scale=0.0883883461356163，output_final_state=true，varlen=true |
 
-这些状态是用户提供的摘要记录，说明该样本通过了工具中的相应检查，并且诊断与普通调用结果一致；它们不替代独立 CPU 标杆精度验收或全路径设备回归。本文没有完整 ATK/msprof 成功报告、CANN 版本、构建 commit、实际加载的 wheel/OPP 信息、采集时的变长序列边界或经核实的计时频率。
+这些状态是用户提供的摘要记录，说明该样本通过了工具中的相应检查，并且诊断与普通调用结果一致；它们不替代独立 CPU 标杆精度验收或全路径设备回归。第三轮 metadata 补充了 source_commit、OPP vendor 路径、成功性能用例记录和普通 kernel 耗时；尚未提供 CANN 版本、已加载产物的校验记录、采集时的变长序列边界或经核实的计时频率。
 
-摘要没有 PHASE6 行。当前 [host 路由](../op_host/op_api/aclnn_chunk_gated_delta_rule_fwd.cpp) 的 `UsePreparePath` 条件与本次 BF16、K/V=128、chunk_size=64、Hv/Hq=2 的输入相符，后续按 Prepare/H/O 路径的 scope 解释。源码对应关系以当前仓库为依据，运行构建版本仍需在内部核对。
+摘要没有 PHASE6 行。当前 [host 路由](../op_host/op_api/aclnn_chunk_gated_delta_rule_fwd.cpp) 的 `UsePreparePath` 条件与本次 BF16、K/V=128、chunk_size=64、Hv/Hq=2 的输入相符，普通 msprof 记录也确认 Prepare/H/O 三项。源码对应关系以当前仓库为依据；采集 source_commit 已核对相关 host/kernel/runtime 未改变，已加载构建产物仍需内部记录核实。
 
 ## 核总窗与采样覆盖
 
@@ -121,7 +123,7 @@ H 的两项上榜 Vector scope 为 `H_VNEW`（median/p95/max=89/92/1104）和 `H
 
 ### 数据来源与一致性
 
-用户提供的四个文件位于仓库的 [atk_output_timer_case0](../../../../../../../tests/atk/chunk_gated_delta_rule_fwd/atk_output/)。本文只做文件间交叉检查，不把它当作重新完成 raw decode 或正式精度验收：
+用户提供的四个文件位于仓库的 [atk_output](../../../../../../../tests/atk/chunk_gated_delta_rule_fwd/atk_output/)（原名 atk_output_timer_case0）。本文只做文件间交叉检查，不把它当作重新完成 raw decode 或正式精度验收：
 
 - core_summary 共 216 行：Prepare 84 核、H 48 核、O 84 核；逻辑 core_id、group_id、sub_id 对应关系正确，等待和覆盖比例与各自 cycles 相除结果一致。
 - stage_summary 共 27 个 launch/stage/核型分组，合计 31488 个动态样本；与 core_summary 的 sample_events 按 launch/核型汇总一致，截断计数两侧均为 984。
@@ -199,7 +201,7 @@ Prepare 的 PREPARE_NORM_GATE 每核调用 median 范围为 422.5～1324.5。Sta
 
 ### 5. 候选顺序、风险与最小实验
 
-下面是当前数据支持的**排查和实验顺序**，不表示已经证明收益排序。尚无普通调用的三个 launch 耗时，收益大小不能量化；源码候选也未在设备实施。
+下面是第二轮数据支持的**排查和实验顺序**，不表示已经证明收益排序。第三轮已补充普通调用的三个 launch 耗时及整体时间预算，见下文；具体 Stage6 候选收益仍不能由 scope 外推，源码候选也未在设备实施。
 
 | 优先级 | 候选 / 唯一主要变量 | 证据与预期作用 | 主要风险 / 采用条件 |
 | --- | --- | --- | --- |
@@ -215,12 +217,62 @@ H 的 16 个 AIC 与当前 [tiling](../../chunk_fwd_h/op_host/chunk_fwd_h_tiling
 
 正式进入优化实现时按仓库阶段 03→04→05 建立设计和实验记录。首轮仅改一个主要变量；先做同输入输出对照、CPU 标杆精度以及受影响路径的 tail/varlen/状态回归，再比较普通调用的重复 msprof 数据。候选需要使整个算子调用耗时的收益超过重复测量波动，并且没有其它支持场景回退，才可采用；timer 窗口变短只用来验证假设。
 
-### 当前仍需的小数据
+### 后续局部定位所需的小数据
 
-1. **普通调用的性能基线最关键。** 提供同一版本、case 0 的实际 Prepare、H、O kernel 名称及 Task Duration(us)；重复测量时保留运行/调用编号、次数和分布，以及构建/加载版本。run_metadata.json 的 performance_evidence 可先提供，但当前脚本按名称筛选的证据不保证含 H/O，缺失时补对应 op_summary 行即可。三 launch 总耗时按同一次普通调用的实际三项相加，再比较重复调用分布；不相加各项 p95，也不用诊断 cycles 代替。
-2. **需要确定具体阻塞点时再补局部摘要。** 从内部 parsed.csv 导出 SOLVE/WU_PREPARE/KKT_EPILOGUE 按调用序号 0～31、核型分组的样本数和 min/median/p95/max，区分首轮与后续前缀；从 O_WAIT 提取每阶段最长几条及同核前后阶段。原始绝对时间戳可留在内部，提供相对本核 offset 即可。O 等待点的精确对应仍需内部时间顺序与源码，而非单独的 iteration 编号。
+普通性能摘要已经在第三轮补齐。需要进一步确定具体阻塞点时，可从内部 parsed.csv 导出 SOLVE/WU_PREPARE/KKT_EPILOGUE 按调用序号 0～31、核型分组的样本数和 min/median/p95/max，区分首轮与后续前缀；从 O_WAIT 提取每阶段最长几条及同核前后阶段。原始绝对时间戳可留在内部，提供相对本核 offset 即可。O 等待点的精确对应仍需内部时间顺序与源码，而非单独的 iteration 编号。这些数据不是进入 Stage6 首轮实验的前置条件。
 
-四个文件已足以提出上述候选，不需要继续传出大 raw/trace。循环中后段未被当前前 32 次采样覆盖；若后续收益判断依赖这些区域，需另行设计采样并做普通/诊断对照，不能盲目增大容量或外推。通用指标定义见 [timer_analysis.md](timer_analysis.md)，采集约束见 [timer_run.md](timer_run.md)，打点位置见 [timer_flow.md](timer_flow.md)。
+现有文件已足以提出上述候选，不需要继续传出大 raw/trace。循环中后段未被当前前 32 次采样覆盖；若后续收益判断依赖这些区域，需另行设计采样并做普通/诊断对照，不能盲目增大容量或外推。通用指标定义见 [timer_analysis.md](timer_analysis.md)，采集约束见 [timer_run.md](timer_run.md)，打点位置见 [timer_flow.md](timer_flow.md)。
+
+## 第三轮：普通调用 msprof 性能基线
+
+### 来源、记录数量与版本
+
+来源：[run_metadata.json](../../../../../../../tests/atk/chunk_gated_delta_rule_fwd/atk_output/run_metadata.json)，SHA256=`1fc92659f6a7b3ba782606646518c280e9836fc767ed2a1aff1cd4df3be20d48`。metadata 的 status=complete、SoC=ascend950、device=0、case_ids=[0]；报告统计记录该性能 case 执行成功。它不替代完整精度验收。
+
+source_commit 为 `29422b8fb49094110208479f7692bd5a2651ea2c`。与分析时 HEAD `1bc6b6d9ef22ac4e0f6a9617cfe77329b6eec3c5` 比较，变化只涉及 timer 文档、离线汇总工具及其测试，相关 kernel/host/调用 runtime 源码未变。metadata 中 OPP vendor 路径已提供，但路径本身不能证明已加载二进制与 source_commit 完全匹配；正式 A/B 仍保留原环境/安装产物校验记录。
+
+另有一项复跑时要核对：采集 case_json_sha256 为 `33530343cec97fc0d7ea7257229221c1f429d547d6e86699ccb23696f39858c0`，与本地当前性能用例文件及采集 source_commit 中该文件的字节哈希均不同。换行归一化后仍不相同，尚不能确认仅是格式差异。A/B 应沿用内部本次保存的 performance_cases.json 和冻结输入，或先核对其语义差异；不用本地同名文件自动替换此次用例。metadata 记录的 case 0 输入快照 SHA256 为 `1f4a29b6a40feb83a424979370638c0b1fb6ee51fa80dd0e513e5d22de73ef38`，本机未读取该快照。
+
+performance_evidence 含来自同一个 DUT op_summary 的 140 条记录：Prepare、H、O 各 20 条，Cast 20 条，Transpose 60 条。全部 duration 为有限正数，行序呈 20 次重复的七项模式：
+
+```text
+Cast → 前置 Transpose 1 → 前置 Transpose 2 → Prepare → H → O → 末置 Transpose
+```
+
+本次三个目标 kernel 均带 aclnnChunkGatedDeltaRuleFwd 前缀，因此名称筛选实际包含 H/O，无需补缺失行。七项均属于该公开调用记录；Cast/Transpose 纳入完整 kernel 时间预算，但不同位置的三个 Transpose 分开统计，不混成一个分布。
+
+这 20 条/项是**单次 profiler 采集内的重复记录**，不是 20 次独立启动测试。metadata 不含 Task ID、Stream ID 或开始时间；下文时间和按连续七项模式构造 20 个候选调用组，不声称构建了完整跨 launch 时间轴。正式 A/B 保留原报告中的任务身份及原统计配置。metadata 的 warmup=5 是诊断采集配置，普通 ATK 性能测试的预热配置需沿用原入口，不能从该字段推断。
+
+### 单项耗时和时间预算
+
+单位 us；p95 使用 nearest-rank；CV 为本批样本总体标准差 / 均值，不代表跨测试批次稳定性。占比使用各项均值 / 七项时间和均值，避免相加各项分位数。
+
+| 项目 | 样本数 | min / median / p95 / max | mean | 本批 CV | 七项时间和均值占比 |
+| --- | ---: | --- | ---: | ---: | ---: |
+| Prepare | 20 | 713.217 / 714.836 / 717.501 / 717.848 | 715.090 | 0.157% | 41.86% |
+| H | 20 | 573.946 / 589.859 / 597.398 / 599.280 | 588.803 | 1.106% | 34.47% |
+| O | 20 | 356.778 / 358.993 / 363.401 / 364.413 | 359.376 | 0.542% | 21.04% |
+| Cast | 20 | 4.111 / 4.860 / 6.056 / 6.319 | 4.971 | 11.331% | 0.29% |
+| 前置 Transpose 1 | 20 | 15.696 / 15.885 / 16.177 / 16.388 | 15.911 | 1.069% | 0.93% |
+| 前置 Transpose 2 | 20 | 14.043 / 14.295 / 14.566 / 15.320 | 14.345 | 1.834% | 0.84% |
+| 末置 Transpose | 20 | 9.020 / 9.871 / 10.451 / 10.746 | 9.895 | 4.915% | 0.58% |
+
+| 按模式分组的时间和 | 组数 | min / median / p95 / max，us | mean，us | 本批 CV |
+| --- | ---: | --- | ---: | ---: |
+| Prepare + H + O | 20 | 1647.409 / 1662.174 / 1675.177 / 1676.718 | 1663.269 | 0.465% |
+| 全部七项 kernel | 20 | 1692.236 / 1707.583 / 1721.140 / 1721.705 | 1708.391 | 0.453% |
+
+七项 kernel 时间和的均值约 1.708 ms。该时间和不包含 host、launch 间隙或未纳入 metadata 的任务，不称为 CPU 侧端到端 wall time。Cast 和三个 Transpose 合计约 2.64%，首轮不优先为这部分改接口或融合边界。
+
+Prepare 是最大且本批波动较小的单项，支持继续选择 Stage6 的局部候选；H 占比仍有约 34.47%，不应因内部采样窗口很短而忽略。为了理解收益预算，若 **整个 Prepare** 平均耗时下降 10%，且其余六项不变，则七项时间和均值可减少约 71.509 us、下降约 4.19%。这只是条件计算，不能把 WU_PREPARE 采样窗口下降 10% 等同于整个 Prepare 下降 10%。
+
+### 现在可以进入首轮实验
+
+已有普通基线足够选择首个候选并开展 A/B，无需继续补同类普通耗时摘要。首轮主要变量仍是 Stage6 同一 task 内 K 输入搬运的下发位置，尝试与 V 的处理重叠；实现前核对 UB 别名、tail 清零、事件闭环及已有 Stage4/5/7 重叠。保持现有数学运算、dtype、cast 和输出语义，先按仓库阶段 03 建立设计和验证记录，再按 04/05 实施与回归。本轮只完成分析归档，未修改算子或执行设备实验。
+
+设备验证使用同环境、同输入和原性能入口，普通调用 A/B 的七项 Task Duration 时间和为主要收益口径，Prepare 单项为直接验证，H/O 及转换项用于检查代价转移。各项分位数分别保留，总分位数在每次调用的时间和上计算。timer 仅用于核对候选是否减少预期窗口，不作为采用依据。
+
+建议交替执行基线 A、候选 B、恢复基线 A，并重复若干批次，保持预热/次数/频率及负载条件一致。按本 metadata 提取顺序，前十组/后十组的七项均值为 1711.478 / 1705.305 us，相差约 0.36%；单批内存在差异，不能把一次很小的下降直接视为稳定收益。收益需要跨批复现并超过波动，同时通过精度和受影响支持场景回归。尚无优化后数据，当前不能填写已获收益。
 
 ## 原始 brief 留档
 
