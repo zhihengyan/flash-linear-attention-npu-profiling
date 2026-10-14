@@ -1,5 +1,7 @@
 # 在内部环境分析 GDN timer
 
+本轮Stage3–5新数据由主入口 --prepare-stage35 自动汇总，优先读取timer/case_0/stage35_analysis/brief.txt与perturbation.csv；具体采集和判断顺序见 [timer_run](timer_run.md#本轮-prepare-stage35-定位) 和 [诊断设计](timer_prepare_stage35_design.md)。以下通用单capture分析仍适用。
+
 raw、完整 CSV、输入张量与 trace 留在原环境。先在内部汇总，再使用 brief.txt 里的计数、分位数与核编号讨论问题。汇总工具只读已解析 CSV 和 JSON 元数据，使用 Python 标准库；复制一个 summarize_timer.py 即可运行，不需要重编 kernel、安装 torch/CANN 或访问外网。
 
 已收到的设备摘要分析：[case 0（2026-10-13 整理）](timer_analysis_case0_2026-10-13.md)，包含原始 brief、源码对应关系、采样限制和下一步排查顺序。
@@ -63,9 +65,9 @@ max/median 明显偏大时，在 core_summary.csv 筛出同一 kernel、同一�
 
 ### 4. 对截断和循环序号保持明确解释
 
-当前只保存每核每阶段前 32 次调用，但记录实际调用总数。brief 的 truncated_core_stage_counters 非零，或 stage_summary 的 truncated_cores 非零，都表示该阶段只是前缀样本。不要用“前 32 次耗时 × actual/32”外推全量，首轮缓存、tail、状态依赖及流水启动/收尾可能不同。
+本分支布局v3每类最多32槽，Prepare只保存选定pack窗口，H/O/Phase6为前缀，另保留实际调用数与独立采样数。truncated_core_stage_counters或truncated_cores非零表示部分采样，包括合法的未覆盖晚窗，不只表示前缀。不要用样本×actual/sampled外推，启动、tail、缓存与流水不同；sampled为0时没有该类型时间证据。
 
-iteration 是每阶段自己的调用序号；H_WH[5] 和 H_KV[5] 不保证是同一个 chunk/head/task。可以在同一核上按时间戳/offset 看先后，跨阶段对应关系需对照真实 scheduler。不同阶段的样本次数也不能直接当相同粒度工作量比较。
+v3 iteration是每阶段密集采样槽；H_WH[5]和H_KV[5]不保证同一任务。Prepare新增细分事件按同核work_id关联，原28粗类work_id=-1无法直接配对。task_summary给出hv/global_chunk/有效M，sequence/local chunk还需原chunk_indices；同ID跨核也不能在时钟未验证时相减。不同scope粒度和嵌套关系仍需保留。
 
 ## 在内部查看等待与流水
 

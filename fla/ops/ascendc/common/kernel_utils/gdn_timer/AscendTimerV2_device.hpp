@@ -31,6 +31,13 @@ public:
         coreId_ = group * AscendTimer::CORES_PER_GROUP + member;
         GM_ADDR slice = timerAddr + static_cast<uint64_t>(kernel) *
             AscendTimer::BUFFER_WORDS_PER_KERNEL * sizeof(int64_t);
+        AscendC::GlobalTensor<int64_t> controls;
+        controls.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(slice));
+        packStart_ = controls(12);
+        packCount_ = controls(13) == 0 ? AscendTimer::MAX_PREPARE_PACK_COUNT : controls(13);
+        detail_ = controls(14) == 1;
+        if (packStart_ < 0 || packCount_ < 1 || packCount_ > AscendTimer::MAX_PREPARE_PACK_COUNT ||
+            controls(14) < 0 || controls(14) > 1) return;
         // AIC 0 is the sole metadata writer. No new cross-core synchronization.
         if ASCEND_IS_AIC {
             if (group == 0) {
@@ -50,6 +57,10 @@ public:
                 header(9) = AscendTimer::DYNAMIC_TYPE_COUNT_ENUM;
                 header(10) = AscendTimer::MAX_DYNAMIC_ITER;
                 header(11) = AscendTimer::DYNAMIC_ITER_PER_CORE_ALIGN;
+                header(12) = packStart_;
+                header(13) = packCount_;
+                header(14) = detail_ ? 1 : 0;
+                header(15) = AscendTimer::DETAIL_TAG_PER_CORE_ALIGN;
                 FlushCacheLines(header, AscendTimer::HEADER_WORDS);
             }
         }
@@ -126,6 +137,9 @@ public:
 
     __aicore__ inline int64_t GetEndCycle() const { return endCycle_; }
     __aicore__ inline bool Enabled() const { return tAddr_ != nullptr; }
+    __aicore__ inline int64_t PackStart() const { return packStart_; }
+    __aicore__ inline int64_t PackCount() const { return packCount_; }
+    __aicore__ inline bool DetailEnabled() const { return detail_; }
 
     __aicore__ inline void setDynamicActualIter(int type, int64_t count)
     {
@@ -136,7 +150,16 @@ public:
         counts(coreId_ * AscendTimer::DYNAMIC_ITER_PER_CORE_ALIGN + type) = count;
     }
 
-    __aicore__ inline void TokNoBarrier(int type, int iter, int64_t start)
+    __aicore__ inline void setDynamicSampledIter(int type, int64_t count)
+    {
+        if (!Enabled()) return;
+        AscendC::GlobalTensor<int64_t> counts;
+        counts.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(tAddr_) +
+            AscendTimer::N_TIMING_COUNTER + AscendTimer::DYNAMIC_ITER_TOTAL_SIZE);
+        counts(coreId_ * AscendTimer::DYNAMIC_ITER_PER_CORE_ALIGN + type) = count;
+    }
+
+    __aicore__ inline void TokNoBarrier(int type, int iter, int64_t start, int64_t workId)
     {
         if (!Enabled() || type < 0 || type >= AscendTimer::DYNAMIC_TYPE_COUNT_ENUM ||
             iter < 0 || iter >= AscendTimer::MAX_DYNAMIC_ITER) return;
@@ -147,6 +170,14 @@ public:
         data.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(tAddr_));
         data(index) = start;
         data(index + 1) = end;
+        if (type >= AscendTimer::FIRST_DETAIL_TYPE) {
+            AscendC::GlobalTensor<int64_t> tags;
+            tags.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(tAddr_) +
+                AscendTimer::N_TIMING_COUNTER + AscendTimer::DYNAMIC_ITER_TOTAL_SIZE * 2);
+            // Zero is unused. The business task with work_id=0 has tag=1.
+            tags(coreId_ * AscendTimer::DETAIL_TAG_PER_CORE_ALIGN +
+                (type - AscendTimer::FIRST_DETAIL_TYPE) * AscendTimer::MAX_DYNAMIC_ITER + iter) = workId + 1;
+        }
     }
 
     __aicore__ inline void FlushRow()
@@ -162,6 +193,16 @@ public:
         counts.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(tAddr_) +
             AscendTimer::N_TIMING_COUNTER + coreId_ * AscendTimer::DYNAMIC_ITER_PER_CORE_ALIGN);
         FlushCacheLines(counts, AscendTimer::DYNAMIC_ITER_PER_CORE_ALIGN);
+        AscendC::GlobalTensor<int64_t> sampled;
+        sampled.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(tAddr_) +
+            AscendTimer::N_TIMING_COUNTER + AscendTimer::DYNAMIC_ITER_TOTAL_SIZE +
+            coreId_ * AscendTimer::DYNAMIC_ITER_PER_CORE_ALIGN);
+        FlushCacheLines(sampled, AscendTimer::DYNAMIC_ITER_PER_CORE_ALIGN);
+        AscendC::GlobalTensor<int64_t> tags;
+        tags.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(tAddr_) +
+            AscendTimer::N_TIMING_COUNTER + AscendTimer::DYNAMIC_ITER_TOTAL_SIZE * 2 +
+            coreId_ * AscendTimer::DETAIL_TAG_PER_CORE_ALIGN);
+        FlushCacheLines(tags, AscendTimer::DETAIL_TAG_PER_CORE_ALIGN);
     }
 
 private:
@@ -183,6 +224,9 @@ private:
     int64_t startCycle_ = 0;
     int64_t endCycle_ = 0;
     bool valid_ = false;
+    int64_t packStart_ = 0;
+    int64_t packCount_ = AscendTimer::MAX_PREPARE_PACK_COUNT;
+    bool detail_ = false;
 };
 
 // Independent starts prevent INIT/BODY, whole-kernel and Phase6 boundaries
@@ -198,7 +242,11 @@ public:
         stage_.BindFrom(all_);
         boundary_.BindFrom(all_);
         if (!all_.Enabled()) return;
-        for (int type = 0; type < AscendTimer::DYNAMIC_TYPE_COUNT_ENUM; ++type) next_[type] = 0;
+        prepare_ = kernel == AscendTimer::PREPARE;
+        for (int type = 0; type < AscendTimer::DYNAMIC_TYPE_COUNT_ENUM; ++type) {
+            next_[type] = 0;
+            sampled_[type] = 0;
+        }
         all_.TikNoBarrier();
         stage_.TikNoBarrier();
 #endif
@@ -213,23 +261,50 @@ public:
 #endif
     }
 
-    // Each stage has its own call ordinal; nested scopes cannot overwrite starts.
-    __aicore__ inline int Begin(AscendTimer::DynamicTimingType type)
+    __aicore__ inline void SetPreparePack(int64_t ordinal)
     {
 #if ENABLE_TIMER
-        if (!Enabled()) return -1;
-        const int iter = next_[type]++;
-        all_.setDynamicActualIter(type, next_[type]);
-        return iter < AscendTimer::MAX_DYNAMIC_ITER ? iter : -1;
+        selected_ = ordinal >= all_.PackStart() && ordinal - all_.PackStart() < all_.PackCount();
+#endif
+    }
+
+    __aicore__ inline void SetWorkId(int task, int64_t workId)
+    {
+#if ENABLE_TIMER
+        workIds_[task] = workId;
+#endif
+    }
+
+    __aicore__ inline int64_t WorkId(int task) const
+    {
+#if ENABLE_TIMER
+        return workIds_[task];
 #else
         return -1;
 #endif
     }
 
-    __aicore__ inline void End(AscendTimer::DynamicTimingType type, int iter, int64_t start)
+    // Actual counts cover the full launch; slots are dense within the selected window.
+    __aicore__ inline int Begin(AscendTimer::DynamicTimingType type)
     {
 #if ENABLE_TIMER
-        all_.TokNoBarrier(type, iter, start);
+        if (!Enabled()) return -1;
+        if (type >= AscendTimer::FIRST_DETAIL_TYPE && (!prepare_ || !all_.DetailEnabled())) return -1;
+        ++next_[type];
+        if (prepare_ && !selected_) return -1;
+        const int iter = sampled_[type];
+        if (iter >= AscendTimer::MAX_DYNAMIC_ITER) return -1;
+        ++sampled_[type];
+        return iter;
+#else
+        return -1;
+#endif
+    }
+
+    __aicore__ inline void End(AscendTimer::DynamicTimingType type, int iter, int64_t start, int64_t workId)
+    {
+#if ENABLE_TIMER
+        all_.TokNoBarrier(type, iter, start, workId);
 #endif
     }
 
@@ -266,8 +341,14 @@ public:
     __aicore__ inline void Finish()
     {
 #if ENABLE_TIMER
+        if (!Enabled()) return;
         all_.template Tok<Overwrite>(AscendTimer::KERNEL_TIMING_IDX);
         stage_.template TokNoBarrier<Overwrite>(AscendTimer::MAIN_BODY, all_.GetEndCycle());
+        // Publish full actual/sample counts once, outside the measured window.
+        for (int type = 0; type < AscendTimer::DYNAMIC_TYPE_COUNT_ENUM; ++type) {
+            all_.setDynamicActualIter(type, next_[type]);
+            all_.setDynamicSampledIter(type, sampled_[type]);
+        }
         // Publish only this core's timer row, after both measured end stamps.
         // No whole-cache flush or extra business/cross-core synchronization.
         all_.FlushRow();
@@ -280,6 +361,10 @@ private:
     AscendTimerDevice stage_;
     AscendTimerDevice boundary_;
     int next_[AscendTimer::DYNAMIC_TYPE_COUNT_ENUM];
+    int sampled_[AscendTimer::DYNAMIC_TYPE_COUNT_ENUM];
+    int64_t workIds_[4] = {-1, -1, -1, -1};
+    bool prepare_ = false;
+    bool selected_ = true; // Stage0 precedes the pack loop.
 #endif
 };
 
@@ -287,17 +372,20 @@ private:
 // windows are NoBarrier issue windows or existing waits; only Finish drains.
 class GdnTimerScope {
 public:
-    __aicore__ inline GdnTimerScope(GdnKernelTimer *timer, AscendTimer::DynamicTimingType type)
+    __aicore__ inline GdnTimerScope(GdnKernelTimer *timer, AscendTimer::DynamicTimingType type, int task = -1)
         : timer_(timer), type_(type)
     {
         if (timer_ != nullptr && timer_->Enabled()) {
             iter_ = timer_->Begin(type_);
-            if (iter_ >= 0) start_ = AscendC::GetSystemCycle(); // TikNoBarrier
+            if (iter_ >= 0) {
+                if (task >= 0) workId_ = timer_->WorkId(task);
+                start_ = AscendC::GetSystemCycle(); // TikNoBarrier
+            }
         }
     }
     __aicore__ inline ~GdnTimerScope()
     {
-        if (iter_ >= 0) timer_->End(type_, iter_, start_); // TokNoBarrier<Overwrite>
+        if (iter_ >= 0) timer_->End(type_, iter_, start_, workId_); // TokNoBarrier<Overwrite>
     }
     GdnTimerScope(const GdnTimerScope &) = delete;
     GdnTimerScope &operator=(const GdnTimerScope &) = delete;
@@ -306,14 +394,26 @@ private:
     AscendTimer::DynamicTimingType type_;
     int iter_ = -1;
     int64_t start_ = 0;
+    int64_t workId_ = -1;
 };
 
 #define GDN_TIMER_JOIN_IMPL(a, b) a##b
 #define GDN_TIMER_JOIN(a, b) GDN_TIMER_JOIN_IMPL(a, b)
 #if ENABLE_TIMER
 #define GDN_TIMER_SCOPE(timer, stage) GdnTimerScope GDN_TIMER_JOIN(gdnTimerScope_, __LINE__)(timer, AscendTimer::stage)
+#define GDN_TIMER_DETAIL_SCOPE(timer, stage, task) GdnTimerScope GDN_TIMER_JOIN(gdnTimerScope_, __LINE__)(timer, AscendTimer::stage, task)
+#define GDN_TIMER_PREPARE_PACK(timer, ordinal, cur) do { \
+    if ((timer) != nullptr && (timer)->Enabled()) { \
+        (timer)->SetPreparePack(ordinal); \
+        for (int gdnTask = 0; gdnTask < (cur).nThis; ++gdnTask) { \
+            (timer)->SetWorkId(gdnTask, PackWorkId((cur).base, (cur).nThis, gdnTask)); \
+        } \
+    } \
+} while (0)
 #else
 #define GDN_TIMER_SCOPE(timer, stage) do {} while (0)
+#define GDN_TIMER_DETAIL_SCOPE(timer, stage, task) do {} while (0)
+#define GDN_TIMER_PREPARE_PACK(timer, ordinal, cur) do {} while (0)
 #endif
 
 #endif // GDN_ASCEND_TIMER_V2_DEVICE_HPP

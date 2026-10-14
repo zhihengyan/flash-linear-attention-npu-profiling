@@ -30,7 +30,43 @@ FLA_NPU_SOC=ascend950 FLA_NPU_OPS= python scripts/build_wheel.py
 
 复制构建末尾输出的准确 wheel 绝对路径到 WHEEL_PATH，执行 `python -m pip install --force-reinstall --no-cache-dir --no-deps "$WHEEL_PATH"`。只安装本轮成功归档的文件，不按提交号或字典序选择旧 wheel；按构建脚本末尾的 staging/归档校验确认内容一致。然后重启测试进程。
 
-## 安装后主入口
+## 本轮 Prepare Stage3–5 定位
+
+分支为 `codex/gdn-prepare-stage3-5-timer`，直接基于 `codex/gdn-profiling` 的809bce68。具体原操作与观测含义见 [诊断设计](timer_prepare_stage35_design.md)。先按上面的完整编译和安装步骤更新到本轮v3 wheel，再运行：
+
+```bash
+python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py \
+  --device 0 --cases 0 --reference-wheel "$WHEEL_PATH" \
+  --prepare-stage35 --timer-repeats 2 \
+  --output-dir tests/atk/chunk_gated_delta_rule_fwd/atk_output_stage35
+```
+
+输出目录必须尚不存在。命令自动完成原普通msprof性能采集和输入保存，再对每核pack ordinal的0/16/32/48窗口各采8pack，逐窗口coarse/detail成对采集；重复2轮，共16次诊断调用，均在普通性能循环外。每次做同输入十输出精确对照、严格解析并自动生成摘要。只有 --prepare-stage35 而不加repeats则8次；不加该开关时仍仅1次粗采集。可用 --prepare-pack-starts 16 32 缩小区间。每次timer约117.38MiB，原始文件留内部。
+
+结果位置：
+
+- `run_metadata.json`：普通Task Duration(us)、准确wheel哈希、输入snapshot哈希和采样计划。
+- `timer/case_0/stage35_analysis/brief.txt`：各窗口细分阶段与粗/细扰动对照。
+- 同目录 `perturbation.csv`、`window_stage_summary.csv`、`summary.json`：较小的成对扰动/阶段汇总。
+- `task_summary.csv`、`pack_summary.csv`：按work ID和本核pack关联，留内部定点查看。
+- `timer/case_0/{coarse,detail}_pack{0,16,32,48}_r{0,1}/analysis/`：每次brief/core/stage/longest；父目录保留raw、parsed、layout、capture metadata和日志。
+
+优先提供run_metadata.json、stage35_analysis/brief.txt和perturbation.csv；不足时再补window_stage_summary.csv。无需传raw。若粗/细窗口变化明显或不一致，先降低粒度/补pipe信息；工具不把任何窗口当launch耗时占比或收益上限。这里的扰动比较仅覆盖固定结束戳之前，Finish之后的count/tag发布与DCCI不在窗口内。
+
+粗/细同v3对照也不能排除整个计时实现改变编译资源。可安装保存好的旧A wheel，用同一新入口单采普通性能：
+
+```bash
+python -m pip install --force-reinstall --no-cache-dir --no-deps "$A_WHEEL"
+python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py \
+  --device 0 --cases 0 --reference-wheel "$A_WHEEL" --ordinary-only \
+  --output-dir tests/atk/chunk_gated_delta_rule_fwd/atk_output_stage35_A
+```
+
+安装后开启新测试进程。ordinary-only仍运行普通ATK/msprof、保存输入和wheel身份，跳过Profile符号和timer，可使用原v2 A包。新v3诊断主入口也先采普通性能；据同条件重复结果核对普通调用是否退化，历史A0只作背景。
+
+读取顺序：先看扰动与采样有效性，再比较两个稳定期区段的S3_KKT_WAIT/S3_POST_KKT与S4_INPUT_WAIT，之后看S3_LEAF_SOLVE、Y完成等待/回读、A transfer及S7_A_READY_WAIT。后者在原Stage6输入等待之后，只显示此时剩余的A依赖。PREPARE_PACK包含上一pack的AIV写回；最后当前pack写回在循环外，不是本pack输出完成时延。issue窗含原内部等待且可嵌套，不能累加为纯计算或全算子时间。本轮先定位，确认候选后再另开优化分支。
+
+## 安装后通用主入口
 
 在仓库根目录运行：
 
@@ -40,7 +76,7 @@ python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --dev
 
 默认执行原 `atk_chunk_gated_delta_rule_fwd_perf.json` 的 case 0/1；可用 `--cases 0` 或 `--cases 1` 选择。脚本按当前 wheel 路径注册 OPP，再检查 ATK/Python、npu-smi、安装产物和 Profile 符号，运行原 ATK performance_device。executor 仅在性能循环外保存该 case 的真实输入值与全部参数；随后同输入普通/诊断调用进行十项输出精确对照，导出 raw、CSV、layout/capture/run metadata 与日志。原 CPU/六 ACLNN 比较规则和性能统计不变。本入口是采集工具，完整精度/确定性/内存验收仍执行 ATK 原 all。
 
-默认结果在 `tests/atk/chunk_gated_delta_rule_fwd/atk_output/gdn_timer_<时间戳>_<随机标识>/`（仓库已忽略 atk_output）。也可用 `--output-dir` 指定一个尚不存在的目录。查看 run_metadata.json 的 status、原性能报告及实际成功用例，再看 timer/case_N 的 capture_metadata.json、timer_layout.json、gdn_npu_time_parsed.csv。采样 actual/sampled/truncated 字段给出每核每阶段计数；出现截断只能分析前 32 个调用。
+默认结果在 `tests/atk/chunk_gated_delta_rule_fwd/atk_output/gdn_timer_<时间戳>_<随机标识>/`（仓库已忽略 atk_output）。也可用 `--output-dir` 指定一个尚不存在的目录。查看 run_metadata.json 的 status、原性能报告及实际成功用例，再看 timer/case_N 的 capture_metadata.json、timer_layout.json、gdn_npu_time_parsed.csv。actual/sampled/truncated给出计数；Prepare为选定pack窗口，H/O/Phase6为前32调用，不外推未记录的部分。
 
 原始数据留在内部环境时，使用 tests/ut/summarize_timer.py 生成小型 brief.txt 及阶段/逐核汇总，首轮只需粘贴摘要。命令、指标含义与分析顺序见 [timer_analysis.md](timer_analysis.md)。
 
@@ -57,7 +93,7 @@ python fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut/pro
 python fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut/profile_gdn.py --parse-only "$RAW_CSV" --output-dir "$PARSED_RESULT"
 ```
 
-独立重放同样在导入 torch_npu 前注册当前 wheel OPP。离线解析不需要 torch/CANN，但必须使用与 raw 对应的布局 v2 源码；不能解析旧布局数据。真实频率参数也适用于该入口。
+独立重放同样在导入 torch_npu 前注册当前 wheel OPP。本分支离线解析仅支持布局v3；原v2 raw使用gdn-profiling分支。独立重放可追加 --prepare-detail --prepare-pack-start 16 --prepare-pack-count 8；重新解析不能补回旧raw未记录的数据。真实频率参数也适用于该入口。
 
 ## 回归与开关对照
 

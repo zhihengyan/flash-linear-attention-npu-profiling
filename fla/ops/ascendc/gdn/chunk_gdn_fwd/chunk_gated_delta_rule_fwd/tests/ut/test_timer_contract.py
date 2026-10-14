@@ -20,7 +20,8 @@ def sample(kernels=(0,), actual=2):
         header = [L['HEADER_MAGIC'], L['LAYOUT_VERSION'], kernel, 1,
                   L['CORE_GROUP_CAPACITY'], L['N_TIMING_COUNTER_PER_CORE_ALIGN'],
                   len(p.FIXED_TIMING_NAMES), 1, 310, len(p.DYNAMIC_TIMING_NAMES),
-                  L['MAX_DYNAMIC_ITER'], L['DYNAMIC_ITER_PER_CORE_ALIGN']]
+                  L['MAX_DYNAMIC_ITER'], L['DYNAMIC_ITER_PER_CORE_ALIGN'],
+                  0, 8, 0, L['DETAIL_TAG_PER_CORE_ALIGN']]
         raw[offset:offset + len(header)] = header
         for core in range(3):
             row = offset + L['HEADER_WORDS'] + core * L['N_TIMING_COUNTER_PER_CORE_ALIGN']
@@ -32,6 +33,7 @@ def sample(kernels=(0,), actual=2):
             raw[row:row+len(fixed)] = fixed
             count = offset + L['HEADER_WORDS'] + L['N_TIMING_COUNTER'] + core * L['DYNAMIC_ITER_PER_CORE_ALIGN']
             raw[count] = actual
+            raw[count + L['DYNAMIC_ITER_TOTAL_SIZE']] = min(actual, L['MAX_DYNAMIC_ITER'])
             for iteration in range(min(actual, L['MAX_DYNAMIC_ITER'])):
                 index = row + 2 * (len(p.FIXED_TIMING_NAMES) + iteration)
                 raw[index:index+2] = [base+40+iteration, base+41+iteration]
@@ -40,9 +42,10 @@ def sample(kernels=(0,), actual=2):
 class TimerContract(unittest.TestCase):
     def test_enum_names_and_alignment(self):
         self.assertEqual(len(p.FIXED_TIMING_NAMES), 6)
-        self.assertEqual(len(p.DYNAMIC_TIMING_NAMES), 28)
-        self.assertEqual(len(set(p.ENUMS['FixedTiming'] + p.ENUMS['DynamicTimingType'])), 34)
-        for key in ('HEADER_WORDS', 'N_TIMING_COUNTER_PER_CORE_ALIGN', 'DYNAMIC_ITER_PER_CORE_ALIGN', 'BUFFER_WORDS_PER_KERNEL'):
+        self.assertEqual(L['FIRST_DETAIL_TYPE'], 28)
+        self.assertEqual(len(p.DYNAMIC_TIMING_NAMES), 60)
+        self.assertEqual(len(set(p.ENUMS['FixedTiming'] + p.ENUMS['DynamicTimingType'])), 66)
+        for key in ('HEADER_WORDS', 'N_TIMING_COUNTER_PER_CORE_ALIGN', 'DYNAMIC_ITER_PER_CORE_ALIGN', 'DETAIL_TAG_PER_CORE_ALIGN', 'BUFFER_WORDS_PER_KERNEL'):
             self.assertEqual(L[key] % L['CACHE_LINE_WORDS'], 0)
 
     def test_phase6_and_repeated_slots(self):
@@ -85,7 +88,7 @@ class TimerContract(unittest.TestCase):
 
     def test_data_beyond_count(self):
         raw=sample();raw[L['HEADER_WORDS']+L['N_TIMING_COUNTER']]=1
-        with self.assertRaisesRegex(ValueError, 'beyond IterCount'):p.parse_timer(raw)
+        with self.assertRaisesRegex(ValueError, 'sampled count'):p.parse_timer(raw)
 
     def test_count_padding(self):
         raw=sample();raw[L['HEADER_WORDS']+L['N_TIMING_COUNTER']+len(p.DYNAMIC_TIMING_NAMES)]=1

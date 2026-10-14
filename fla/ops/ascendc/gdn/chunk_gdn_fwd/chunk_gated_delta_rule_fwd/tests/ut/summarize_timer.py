@@ -46,6 +46,9 @@ def read_events(path):
             raise ValueError("CSV lacks required GDN fields; decode it with the matching parser first")
         for line, row in enumerate(reader, 2):
             event = {key: row[key] for key in fields}
+            event["work_id"] = int(row.get("work_id", -1))
+            if event["work_id"] < -1:
+                raise ValueError(f"CSV line {line}: invalid work_id")
             for key in ("core_id", "group_id", "sub_id", "iteration", "start_cycle", "end_cycle", "duration_cycles"):
                 event[key] = int(event[key])
             core = event["core_id"]
@@ -98,7 +101,11 @@ def analyze(events, layout, capture=None):
             key = kernel, core, count["stage"]
             if key in counts:
                 raise ValueError("duplicate dynamic count metadata")
-            if count["sampled"] != min(actual, sample_limit) or count["truncated"] != (actual > sample_limit):
+            sampled = count["sampled"]
+            pack_window = item.get("sampling", {}).get("mode") == "pack_window"
+            if type(sampled) is not int or not 0 <= sampled <= min(actual, sample_limit) or count["truncated"] != (actual > sampled):
+                raise ValueError("inconsistent sampled/actual/truncated metadata")
+            if not pack_window and sampled != min(actual, sample_limit):
                 raise ValueError("inconsistent sampled/actual/truncated metadata")
             counts[key] = count
     core_events = defaultdict(list)
@@ -109,7 +116,7 @@ def analyze(events, layout, capture=None):
             sampled_iters[event["kernel"], event["core_id"], event["stage"]].add(event["iteration"])
     if set(core_events) != expected_cores:
         raise ValueError("CSV cores/launches do not match timer_layout.json")
-    if set(sampled_iters) != set(counts):
+    if set(sampled_iters) != {key for key, count in counts.items() if count["sampled"]}:
         raise ValueError("CSV dynamic stages do not match iteration metadata")
     for key, count in counts.items():
         if sampled_iters[key] != set(range(count["sampled"])):
@@ -149,6 +156,7 @@ def analyze(events, layout, capture=None):
             by_stage[event["kernel"], event["stage"], event["core_type"]].append(event)
             longest.append(dict(kernel=kernel, core_id=core, group_id=core//3, core_type=event["core_type"],
                 stage=event["stage"], iteration=event["iteration"], kind=event["kind"],
+                work_id=event.get("work_id", -1),
                 duration_cycles=event["duration_cycles"], start_offset_cycles=event["start_cycle"]-begin))
     stage_rows = []
     for (kernel, stage, core_type), observed in sorted(by_stage.items()):
@@ -188,7 +196,7 @@ def analyze(events, layout, capture=None):
         warnings.append("No dynamic scopes are recorded; key-stage analysis is unavailable.")
     truncated = sum(c["truncated"] for c in counts.values())
     if truncated:
-        warnings.append(f"{truncated} core/stage counters are truncated; each keeps only the first {sample_limit} calls. Do not extrapolate full-work duration.")
+        warnings.append(f"{truncated} core/stage counters are partially sampled (at most {sample_limit} calls). Consult sampling metadata. Do not extrapolate full-work duration.")
     if capture.get("decode_status", "unknown") != "complete":
         warnings.append("Capture decode_status is not recorded as complete; this summary validates parsed data, not original raw.")
     comparison = capture.get("output_comparison", "unknown")
@@ -211,6 +219,7 @@ def analyze(events, layout, capture=None):
         sample_count=capture.get("sample_count","unknown"),
         warmup=capture.get("warmup","unknown"), cycles_per_us=frequency,
         sample_limit=sample_limit, truncated_core_stage_counters=truncated,
+        sampling={key: value.get("sampling", {"mode": "prefix"}) for key, value in metadata.items()},
         warnings=warnings, kernels=kernel_rows, stages=stage_rows,
         longest_dynamic_windows=sorted(longest,key=lambda e:e["duration_cycles"],reverse=True)[:12],
         semantics=["Sample sums across cores are core-cycles, not elapsed launch time or bottleneck contribution.",
@@ -218,7 +227,7 @@ def analyze(events, layout, capture=None):
             "Wait unions use a single core's timestamps; they do not measure hardware idle cycles.",
             "Unobserved timeline regions can be uninstrumented work, asynchronous execution or truncation; they are not proven bubbles.",
             "Scope coverage includes coarse Process windows; high coverage does not imply complete fine-stage sampling.",
-            "Iteration means per-stage call ordinal, not a shared head/chunk/task id.",
+            "Iteration is a dense per-stage sample slot; use work_id for Prepare detail task joins.",
             "Each launch is analyzed separately; this tool does not construct a cross-core or cross-launch timeline.",
             "One capture cannot establish a stable performance regression; use repeated ordinary msprof measurements."])
     return summary, core_rows
@@ -230,6 +239,7 @@ def brief(summary, top=12):
         f"device={summary['device_name']} torch={summary['torch']} captures={summary['sample_count']} warmup={summary['warmup']}",
         "inputs="+json.dumps(summary["inputs"],separators=(",",":")),
         "options="+json.dumps(summary["options"],separators=(",",":")),
+        "sampling="+json.dumps(summary["sampling"],separators=(",",":")),
         f"sample_limit={summary['sample_limit']} truncated_core_stage_counters={summary['truncated_core_stage_counters']}",
         "", "Per-core kernel windows: kernel/type cores issue-scope-cores median/p95/max cycles max/median wait-union median% sampled-window median%"]
     for row in summary["kernels"]:

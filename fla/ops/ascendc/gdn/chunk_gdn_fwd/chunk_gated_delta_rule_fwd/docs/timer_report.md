@@ -1,5 +1,7 @@
 # GDN profiling 接入状态
 
+2026-10-14新增Prepare Stage3–5诊断分支 `codex/gdn-prepare-stage3-5-timer`，基于809bce68，布局升级v3。当前改动/离线测试/独立审核/设备待验以 [本轮记录](timer_prepare_stage35_report.md) 为准。以下为原profiling分支的历史接入与case0证据，原v2数据仍由对应基点源码解析。
+
 分支：codex/gdn-profiling，从 main `90176b44321ebdbf3ae2a9057243157d7085c6e1` 创建。接入范围为 ChunkGatedDeltaRuleFwd 的融合 Arch22/Arch35 路径与 A5 Prepare/H/O 路径；叶子算子 ChunkGatedDeltaRuleFwdPrepare、ChunkFwdH、ChunkFwdO 的普通调用也需设备回归。
 
 已接入独立 ACLNN Profile 符号、可选 L0 timer 输入、Python 私有诊断调用、6 个固定阶段和 28 个动态阶段。当前 195 个动态 scope 覆盖关键运算及已有等待。每阶段每核采样前 32 次，实际总数另存并标记截断；四个 launch 的缓冲分开。原同步顺序与公开生产 ABI 保持，timer 布局 v2 是新增诊断协议。

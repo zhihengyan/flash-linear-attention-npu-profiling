@@ -38,6 +38,7 @@ def generate_trace_json(events, output_path, cycles_per_us, *, shared_clock=Fals
         record = dict(name=event["stage"], cat=event["kind"], pid=pid, tid=core,
                       ts=start / cycles_per_us, args={k: event[k] for k in
                       ("start_cycle", "end_cycle", "duration_cycles", "kind", "iteration")})
+        record["args"]["work_id"] = event.get("work_id", -1)
         if event["kind"] == "point":
             record.update(ph="i", s="t", ts=(start + event["duration_cycles"] / 2) / cycles_per_us)
         else:
@@ -62,6 +63,7 @@ def main():
     with args.csv.open(encoding="utf-8", newline="") as stream:
         events = list(csv.DictReader(stream))
     for event in events:
+        event["work_id"] = int(event.get("work_id", -1))
         for key in ("core_id", "group_id", "sub_id", "iteration", "start_cycle", "end_cycle", "duration_cycles"):
             event[key] = int(event[key])
         if event["end_cycle"] < event["start_cycle"] or event["duration_cycles"] != event["end_cycle"] - event["start_cycle"]:

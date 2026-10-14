@@ -516,21 +516,52 @@ public:
     __aicore__ inline void Stage3_AivOne(int64_t hv, int64_t taskIdx)
     {
         GDN_TIMER_SCOPE(timer_, KKT_EPILOGUE);
+        {
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S3_KKT_WAIT, taskIdx);
             WaitCubeKktDone(taskIdx);
-            const int32_t db = PingPongSlot(taskIdx);
-            const int32_t kktDb = PingPongSlot(OwnerTaskIdx(hv, taskIdx));
+        }
+        GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S3_POST_KKT, taskIdx);
+        const int32_t db = PingPongSlot(taskIdx);
+        const int32_t kktDb = PingPongSlot(OwnerTaskIdx(hv, taskIdx));
+        {
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S3_GATE_MUL, taskIdx);
             MulKktGateVF(ubKkt[kktDb], ubLFull[db]);
+        }
+        {
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S3_L_READY_WAIT, taskIdx);
             SetFlag<HardEvent::V_MTE3>(kHeUb0);
             WaitFlag<HardEvent::V_MTE3>(kHeUb0);
+        }
+        {
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S3_LEAF_PACK, taskIdx);
             PackDiagLeavesFromUb(ubLPacked[db], ubLFull[db]);
+        }
+        {
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S3_PACK_READY_WAIT, taskIdx);
             SetFlag<HardEvent::MTE3_V>(kHeS3Pack);
             WaitFlag<HardEvent::MTE3_V>(kHeS3Pack);
+        }
+        {
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S3_NEG_L_UPLOAD, taskIdx);
             UbNd64ToL1Nz8(l1NegL[taskIdx], ubLFull[db]);
+        }
+        {
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S3_LEAF_SOLVE, taskIdx);
             MulReduceScatterVF32(ubResVcs[db], ubLPacked[db], ubResVcs[db], ubVcsIdx);
+        }
+        {
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S3_SOLVE_READY_WAIT, taskIdx);
             SetFlag<HardEvent::V_MTE3>(kHeUb0);
             WaitFlag<HardEvent::V_MTE3>(kHeUb0);
+        }
+        {
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S3_LEAF_UPLOAD, taskIdx);
             UploadDiagLeavesToL1(l1LeafRight[taskIdx], l1LeafLeft[taskIdx], ubResVcs[db]);
+        }
+        {
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S3_READY_PUBLISH, taskIdx);
             NotifyAicStage3Done(taskIdx);
+        }
     }
 
     // ========================= Stage 4 =========================
@@ -564,27 +595,44 @@ public:
     __aicore__ inline void Stage4_AccIssue(int64_t taskIdx)
     {
         GDN_TIMER_SCOPE(timer_, PREPARE_SOLVE_ISSUE);
-            const int32_t bt = static_cast<int32_t>(chunkSize);
-            const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
-            WaitFlag<HardEvent::M_MTE1>(bank);
-            MatmulToL0C<float>(l1LeafLeft[taskIdx], l1NegL[taskIdx], l0AfP[bank], l0BfP[bank], l0CTask[taskIdx], bt, bt, bt,
-                               false, true, true, bank);
-            SetFlag<HardEvent::M_FIX>(bank);
-            SetFlag<HardEvent::M_MTE1>(bank);
+        GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S4_ACC_ISSUE, taskIdx);
+        const int32_t bt = static_cast<int32_t>(chunkSize);
+        const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
+        WaitFlag<HardEvent::M_MTE1>(bank);
+        MatmulToL0C<float>(l1LeafLeft[taskIdx], l1NegL[taskIdx], l0AfP[bank], l0BfP[bank], l0CTask[taskIdx], bt, bt, bt,
+            false, true, true, bank);
+        SetFlag<HardEvent::M_FIX>(bank);
+        SetFlag<HardEvent::M_MTE1>(bank);
     }
 
     __aicore__ inline void Stage4_Dump(int64_t taskIdx)
     {
         GDN_TIMER_SCOPE(timer_, PREPARE_SOLVE_DUMP);
-            const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
+        GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S4_Y_TRANSFER, taskIdx);
+        const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
+        {
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S4_CUBE_DONE_WAIT, taskIdx);
             WaitFlag<HardEvent::M_FIX>(bank);
+        }
+        {
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S4_Y_GM_WRITE, taskIdx);
             FixpipeL0cToGmNzCs(gmWsY[WsYOffset(taskIdx)], l0CTask[taskIdx], kChunk64);
-            SetFlag<HardEvent::FIX_M>(bank);
+        }
+        SetFlag<HardEvent::FIX_M>(bank);
+        {
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S4_Y_GM_DONE_WAIT, taskIdx);
             SetFlag<HardEvent::FIX_MTE2>(bank);
             WaitFlag<HardEvent::FIX_MTE2>(bank);
+        }
+        {
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S4_Y_L1_READ, taskIdx);
             CopyGmNzToL1Fp32(l1Y[taskIdx], gmWsY[WsYOffset(taskIdx)], kChunk64);
+        }
+        {
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S4_READY_PUBLISH, taskIdx);
             NotifyAivStage4Done(taskIdx);
             SetFlag<HardEvent::MTE2_MTE1>(taskIdx);
+        }
     }
 
     // ========================= Stage 5 =========================
@@ -596,16 +644,17 @@ public:
     __aicore__ inline void Stage5_Compute(int64_t taskIdx)
     {
         GDN_TIMER_SCOPE(timer_, SOLVE);
-            const int32_t bt = static_cast<int32_t>(chunkSize);
-            const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
-            WaitFlag<HardEvent::M_MTE1>(bank);
-            MatmulToL0C<float>(l1I, l1LeafLeft[taskIdx], l0Af[bank], l0Bf[bank], l0CTask[taskIdx], bt, bt, bt, true, false,
-                               false, bank);
-            SetFlag<HardEvent::FIX_M>(bank);
-            MatmulToL0C<float>(l1Y[taskIdx], l1LeafRight[taskIdx], l0AfP[bank], l0BfP[bank], l0CTask[taskIdx], bt, bt, bt,
-                               false, false, false, bank);
-            SetFlag<HardEvent::M_FIX>(bank);
-            SetFlag<HardEvent::M_MTE1>(bank);
+        GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S5_COMPUTE, taskIdx);
+        const int32_t bt = static_cast<int32_t>(chunkSize);
+        const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
+        WaitFlag<HardEvent::M_MTE1>(bank);
+        MatmulToL0C<float>(l1I, l1LeafLeft[taskIdx], l0Af[bank], l0Bf[bank], l0CTask[taskIdx], bt, bt, bt, true, false,
+            false, bank);
+        SetFlag<HardEvent::FIX_M>(bank);
+        MatmulToL0C<float>(l1Y[taskIdx], l1LeafRight[taskIdx], l0AfP[bank], l0BfP[bank], l0CTask[taskIdx], bt, bt, bt,
+            false, false, false, bank);
+        SetFlag<HardEvent::M_FIX>(bank);
+        SetFlag<HardEvent::M_MTE1>(bank);
     }
 
     __aicore__ inline void DumpAL0cToL1(int64_t taskIdx, uint32_t n)
@@ -624,27 +673,58 @@ public:
     __aicore__ inline void Stage5_Dump(const ChunkRange &chunk, int64_t hv, int64_t taskIdx)
     {
         GDN_TIMER_SCOPE(timer_, PREPARE_SOLVE_DUMP);
-            const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
-            const uint32_t n = static_cast<uint32_t>(chunkSize);
-            const uint32_t m = static_cast<uint32_t>(chunk.M);
-            const int64_t offA = OffsetBHTD(chunk.batch, hv, chunk.tokenStart, HV, T, chunkSize);
+        GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S5_A_TRANSFER, taskIdx);
+        const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
+        const uint32_t n = static_cast<uint32_t>(chunkSize);
+        const uint32_t m = static_cast<uint32_t>(chunk.M);
+        const int64_t offA = OffsetBHTD(chunk.batch, hv, chunk.tokenStart, HV, T, chunkSize);
+        {
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S5_CUBE_DONE_WAIT, taskIdx);
             WaitFlag<HardEvent::M_FIX>(bank);
-            if (outputA != 0) {
+        }
+        if (outputA != 0) {
+            {
+                GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S5_A_GM_WRITE, taskIdx);
                 FixpipeL0cToGmNd<InDtype>(gmA[offA], l0CTask[taskIdx], m, n, n);
+            }
+            {
+                GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S5_A_GM_DONE_WAIT, taskIdx);
                 SetFlag<HardEvent::FIX_MTE2>(bank);
                 WaitFlag<HardEvent::FIX_MTE2>(bank);
-                if (m == n) {
+            }
+            if (m == n) {
+                {
+                    GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S5_A_L1_READ, taskIdx);
                     CopyGmNdToL1Nz<InDtype>(l1A[taskIdx], gmA[offA], n, n);
+                }
+                {
+                    GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S5_A_READY_PUBLISH, taskIdx);
                     SetFlag<HardEvent::MTE2_MTE1>(taskIdx);
-                } else {
-                    DumpAL0cToL1(taskIdx, n);
-                    SetFlag<HardEvent::FIX_MTE1>(taskIdx);
                 }
             } else {
+                {
+                    GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S5_A_L1_WRITE, taskIdx);
+                    DumpAL0cToL1(taskIdx, n);
+                }
+                {
+                    GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S5_A_READY_PUBLISH, taskIdx);
+                    SetFlag<HardEvent::FIX_MTE1>(taskIdx);
+                }
+            }
+        } else {
+            {
+                GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S5_A_L1_WRITE, taskIdx);
                 DumpAL0cToL1(taskIdx, n);
+            }
+            {
+                GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S5_A_READY_PUBLISH, taskIdx);
                 SetFlag<HardEvent::FIX_MTE1>(taskIdx);
             }
+        }
+        {
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S5_READY_PUBLISH, taskIdx);
             SetFlag<HardEvent::FIX_M>(bank);
+        }
     }
 
     // ========================= Stage 6 =========================
@@ -813,6 +893,8 @@ public:
         const int64_t nPacks = CeilDiv(totalChunks, packSize);
         for (int64_t pack = coreIdx; pack < nPacks; pack += numCore) {
             const PackWalk cur = MakePackWalk(pack, packSize);
+            GDN_TIMER_PREPARE_PACK(timer_, (pack - coreIdx) / numCore, cur);
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_PACK, 0);
             PackWalk prev{};
             if (pack != coreIdx) {
                 prev = MakePackWalk(pack - numCore, packSize);
@@ -878,6 +960,8 @@ public:
         const int64_t nPacks = CeilDiv(totalChunks, packSize);
         for (int64_t pack = coreIdx; pack < nPacks; pack += numCore) {
             const PackWalk cur = MakePackWalk(pack, packSize);
+            GDN_TIMER_PREPARE_PACK(timer_, (pack - coreIdx) / numCore, cur);
+            GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_PACK, 0);
             WaitFlag<HardEvent::FIX_MTE1>(0);
             for (int64_t t = 0; t < cur.nThis; ++t) {
                 if (!OwnsHk(PackWorkId(cur.base, cur.nThis, t) % HV)) {
@@ -896,12 +980,14 @@ public:
             if (cur.nThis > 0) {
                 {
                     GDN_TIMER_SCOPE(timer_, FRONT_WAIT);
+                    GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S4_INPUT_WAIT, 0);
                     WaitAivStage3Done(0);
                 }
                 Stage4_AccIssue(0);
                 for (int64_t t = 1; t < cur.nThis; ++t) {
                     {
                         GDN_TIMER_SCOPE(timer_, FRONT_WAIT);
+                        GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S4_INPUT_WAIT, t);
                         WaitAivStage3Done(t);
                     }
                     Stage4_AccIssue(t);
@@ -911,7 +997,10 @@ public:
             }
             if (cur.nThis > 0) {
                 for (int64_t t = 0; t < cur.nThis; ++t) {
-                    WaitFlag<HardEvent::MTE2_MTE1>(t);
+                    {
+                        GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S5_Y_READY_WAIT, t);
+                        WaitFlag<HardEvent::MTE2_MTE1>(t);
+                    }
                     Stage5_Compute(t);
                     ChunkRange chunk;
                     int64_t hv;
@@ -922,15 +1011,19 @@ public:
             for (int64_t t = 0; t < cur.nThis; ++t) {
                 {
                     GDN_TIMER_SCOPE(timer_, FRONT_WAIT);
+                    GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S7_INPUT_WAIT, t);
                     WaitAivStage6Done(t);
                 }
                 ChunkRange chunk;
                 int64_t hv;
                 DecodeTask(cur.base, cur.nThis, t, chunk, hv);
-                if (outputA != 0 && chunk.M == chunkSize) {
-                    WaitFlag<HardEvent::MTE2_MTE1>(t);
-                } else {
-                    WaitFlag<HardEvent::FIX_MTE1>(t);
+                {
+                    GDN_TIMER_DETAIL_SCOPE(timer_, PREPARE_S7_A_READY_WAIT, t);
+                    if (outputA != 0 && chunk.M == chunkSize) {
+                        WaitFlag<HardEvent::MTE2_MTE1>(t);
+                    } else {
+                        WaitFlag<HardEvent::FIX_MTE1>(t);
+                    }
                 }
                 Stage7_AicOne(chunk, hv, t);
             }

@@ -66,7 +66,7 @@ KERNEL_NAMES = dict(enumerate(ENUMS["KernelSlice"]))
 DYNAMIC_TIMING_NAMES = dict(enumerate(ENUMS["DynamicTimingType"]))
 POINTS = {"PHASE6_FRONT_DONE", "PHASE6_H_DISPATCH_DONE"}
 FIELDS = ["kernel", "core_id", "group_id", "core_type", "sub_id", "stage", "kind",
-          "iteration", "start_cycle", "end_cycle", "duration_cycles"]
+          "iteration", "work_id", "start_cycle", "end_cycle", "duration_cycles"]
 
 
 def validate_frequency(cycles_per_us):
@@ -110,24 +110,44 @@ def parse_timer(raw):
         data = raw[offset:offset + LAYOUT["BUFFER_WORDS_PER_KERNEL"]]
         if not any(data):
             continue
+        # The host may prefill immutable Prepare controls before a route is selected.
+        if not data[0] and not any(data[:12] + data[15:]):
+            if kernel != "PREPARE" or data[12] < 0 or not 0 <= data[13] <= LAYOUT["MAX_PREPARE_PACK_COUNT"] or data[14] not in (0, 1):
+                raise ValueError(f"{kernel}: invalid unused-slice controls")
+            continue
         expected = {0: LAYOUT["HEADER_MAGIC"], 1: LAYOUT["LAYOUT_VERSION"], 2: kernel_id,
                     4: capacity, 5: stride, 6: len(FIXED_TIMING_NAMES), 7: 1,
                     9: len(DYNAMIC_TIMING_NAMES), 10: LAYOUT["MAX_DYNAMIC_ITER"],
-                    11: LAYOUT["DYNAMIC_ITER_PER_CORE_ALIGN"]}
+                    11: LAYOUT["DYNAMIC_ITER_PER_CORE_ALIGN"],
+                    15: LAYOUT["DETAIL_TAG_PER_CORE_ALIGN"]}
         if any(data[i] != value for i, value in expected.items()):
             raise ValueError(f"{kernel}: invalid layout metadata (rebuild OPP and parser together)")
         groups = data[3]
         if not 0 < groups <= capacity:
             raise ValueError(f"{kernel}: blockDim {groups} exceeds reserved capacity {capacity}")
-        kernel_metadata = {"kernel": kernel, "block_dim": groups, "arch": data[8], "iterations": []}
+        if data[12] < 0 or not 1 <= data[13] <= LAYOUT["MAX_PREPARE_PACK_COUNT"] or data[14] not in (0, 1):
+            raise ValueError(f"{kernel}: invalid Prepare sampling controls")
+        if kernel != "PREPARE" and (data[12] or data[14]):
+            raise ValueError(f"{kernel}: Prepare-only controls on another slice")
+        kernel_metadata = {"kernel": kernel, "block_dim": groups, "arch": data[8], "iterations": [],
+                           "sampling": {"mode": "pack_window" if kernel == "PREPARE" else "prefix",
+                                        "pack_start": data[12], "pack_count": data[13],
+                                        "detail_enabled": bool(data[14])}}
         metadata.append(kernel_metadata)
         rows = data[LAYOUT["HEADER_WORDS"]:LAYOUT["HEADER_WORDS"] + LAYOUT["N_TIMING_COUNTER"]]
-        counts = data[LAYOUT["HEADER_WORDS"] + LAYOUT["N_TIMING_COUNTER"]:]
+        count_offset = LAYOUT["HEADER_WORDS"] + LAYOUT["N_TIMING_COUNTER"]
+        count_size = LAYOUT["DYNAMIC_ITER_TOTAL_SIZE"]
+        counts = data[count_offset:count_offset + count_size]
+        sampled_counts = data[count_offset + count_size:count_offset + count_size * 2]
+        tags = data[count_offset + count_size * 2:]
+        tag_stride = LAYOUT["DETAIL_TAG_PER_CORE_ALIGN"]
         count_stride = LAYOUT["DYNAMIC_ITER_PER_CORE_ALIGN"]
         if any(rows[groups * members * stride:]):
             raise ValueError(f"{kernel}: writes outside actual blockDim")
         if any(counts[groups * members * count_stride:]):
             raise ValueError(f"{kernel}: counts outside actual blockDim")
+        if any(sampled_counts[groups * members * count_stride:]) or any(tags[groups * members * tag_stride:]):
+            raise ValueError(f"{kernel}: samples/tags outside actual blockDim")
         for core_id in range(groups * members):
             row = rows[core_id * stride:(core_id + 1) * stride]
             parent = row[:2]
@@ -152,21 +172,34 @@ def parse_timer(raw):
                                    core_type="AIC" if member == 0 else "AIV", sub_id=member - 1,
                                    stage=stage, kind="point" if stage in POINTS else
                                    "issue" if stage == "MAIN_INIT" else "window",
-                                   iteration=-1, start_cycle=start, end_cycle=end, duration_cycles=end - start))
+                                   iteration=-1, work_id=-1, start_cycle=start, end_cycle=end, duration_cycles=end - start))
             core_counts = counts[core_id * count_stride:(core_id + 1) * count_stride]
-            if any(core_counts[len(DYNAMIC_TIMING_NAMES):]):
+            core_sampled = sampled_counts[core_id * count_stride:(core_id + 1) * count_stride]
+            core_tags = tags[core_id * tag_stride:(core_id + 1) * tag_stride]
+            if any(core_counts[len(DYNAMIC_TIMING_NAMES):]) or any(core_sampled[len(DYNAMIC_TIMING_NAMES):]):
                 raise ValueError(f"{kernel}/core {core_id}: nonzero count padding")
+            if any(core_tags[LAYOUT["DETAIL_TYPE_COUNT"] * LAYOUT["MAX_DYNAMIC_ITER"]:]):
+                raise ValueError(f"{kernel}/core {core_id}: nonzero tag padding")
             for type_id, stage in DYNAMIC_TIMING_NAMES.items():
                 actual = core_counts[type_id]
-                sampled = min(actual, LAYOUT["MAX_DYNAMIC_ITER"])
+                sampled = core_sampled[type_id]
+                detail = type_id >= LAYOUT["FIRST_DETAIL_TYPE"]
+                if sampled > min(actual, LAYOUT["MAX_DYNAMIC_ITER"]):
+                    raise ValueError(f"{kernel}/core {core_id}/{stage}: invalid sampled count")
+                if kernel != "PREPARE" and sampled != min(actual, LAYOUT["MAX_DYNAMIC_ITER"]):
+                    raise ValueError(f"{kernel}/core {core_id}/{stage}: incomplete prefix sampling")
+                if detail and actual and (kernel != "PREPARE" or not data[14]):
+                    raise ValueError(f"{kernel}/core {core_id}/{stage}: detail disabled")
                 if actual:
                     kernel_metadata["iterations"].append(dict(core_id=core_id, stage=stage,
                         actual=actual, sampled=sampled, truncated=actual > sampled))
+                seen_work_ids = set()
                 for iteration in range(LAYOUT["MAX_DYNAMIC_ITER"]):
                     index = 2 * (len(FIXED_TIMING_NAMES) + type_id * LAYOUT["MAX_DYNAMIC_ITER"] + iteration)
                     start, end = row[index:index + 2]
+                    tag = core_tags[(type_id - LAYOUT["FIRST_DETAIL_TYPE"]) * LAYOUT["MAX_DYNAMIC_ITER"] + iteration] if detail else 0
                     if iteration >= sampled:
-                        if start or end:
+                        if start or end or tag:
                             raise ValueError(f"{kernel}/core {core_id}/{stage}: data beyond IterCount")
                         continue
                     if not start or not end or end < start:
@@ -174,9 +207,14 @@ def parse_timer(raw):
                     if start < parent[0] or end > parent[1]:
                         raise ValueError(f"{kernel}/core {core_id}/{stage}[{iteration}]: outside KERNEL_TIMING")
                     member = core_id % members
+                    if detail:
+                        if not tag or tag in seen_work_ids:
+                            raise ValueError(f"{kernel}/core {core_id}/{stage}: missing/duplicate work_id")
+                        seen_work_ids.add(tag)
                     events.append(dict(kernel=kernel, core_id=core_id, group_id=core_id // members,
                         core_type="AIC" if member == 0 else "AIV", sub_id=member - 1, stage=stage,
                         kind="wait" if stage.endswith("WAIT") else "issue", iteration=iteration,
+                        work_id=tag - 1 if detail else -1,
                         start_cycle=start, end_cycle=end, duration_cycles=end-start))
             if not (row[2] <= row[3] <= row[4] <= row[5] == parent[1]):
                 raise ValueError(f"{kernel}/core {core_id}: invalid INIT/BODY order")
@@ -206,8 +244,8 @@ def parse_and_dump(raw_path, output_dir, cycles_per_us=None):
     events, metadata = parse_timer(read_raw(raw_path))
     truncated = [item for kernel in metadata for item in kernel["iterations"] if item["truncated"]]
     if truncated:
-        print(f"WARNING: {len(truncated)} per-core stage counters exceed MAX_DYNAMIC_ITER="
-              f"{LAYOUT['MAX_DYNAMIC_ITER']}; only the first calls are sampled. See timer_layout.json.",
+        print(f"WARNING: {len(truncated)} per-core stage counters are partially sampled; "
+              "Prepare uses selected packs; H/O/Phase6 keep a prefix. See timer_layout.json.",
               file=sys.stderr)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -226,6 +264,8 @@ def parse_and_dump(raw_path, output_dir, cycles_per_us=None):
         "clock_alignment": "unverified; raw cycles only",
         "init_semantics": "issue window, may include asynchronous initialization",
         "point_semantics": "dispatch boundary, midpoint of adjacent Tik/Tok pair",
+        "iteration_semantics": "dense per-stage sample slot; not a global call ordinal or task id",
+        "work_id_semantics": "Prepare detail: original PackWorkId; PREPARE_PACK uses its first task; -1 means unavailable",
     }, indent=2), encoding="utf-8")
     return path, events, metadata
 

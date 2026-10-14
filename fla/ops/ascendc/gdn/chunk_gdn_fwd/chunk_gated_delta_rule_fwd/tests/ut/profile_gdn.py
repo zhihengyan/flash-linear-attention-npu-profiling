@@ -47,13 +47,20 @@ def export(raw_path, output_dir, cycles_per_us=None, shared_clock=False):
 
 
 def capture(q, k, v, g, beta, *, output_dir, warmup=5, check_output=False,
-            cycles_per_us=None, shared_clock=False, **kwargs):
+            cycles_per_us=None, shared_clock=False, prepare_pack_start=0,
+            prepare_pack_count=8, prepare_detail=False, input_snapshot_sha256=None, **kwargs):
     """Use real model tensors here. Keep each call's timer separate and synchronize before export."""
     import torch
     from fla_npu.ops.ascendc import _aclnn_ctypes as adapter
     from fla_npu.ops.ascendc import _runtime
 
     validate_frequency(cycles_per_us)
+    if type(prepare_pack_start) is not int or not 0 <= prepare_pack_start < 2**63:
+        raise ValueError("prepare_pack_start must be a nonnegative int64")
+    if type(prepare_pack_count) is not int or not 1 <= prepare_pack_count <= LAYOUT["MAX_PREPARE_PACK_COUNT"]:
+        raise ValueError("prepare_pack_count must be 1..8")
+    if type(prepare_detail) is not bool:
+        raise ValueError("prepare_detail must be bool")
     if warmup < 0 or q.device.type != "npu":
         raise ValueError("warmup must be nonnegative and inputs must be on an NPU")
     if shared_clock and cycles_per_us is None:
@@ -70,6 +77,10 @@ def capture(q, k, v, g, beta, *, output_dir, warmup=5, check_output=False,
         timer = torch.zeros(TOTAL_BUFFER_SIZE, dtype=torch.int64, device=device)
         if timer.data_ptr() % LAYOUT["CACHE_LINE_BYTES"]:
             raise ValueError("timer storage must be cache-line aligned for per-core GM publication")
+        control_offset = LAYOUT["PREPARE"] * LAYOUT["BUFFER_WORDS_PER_KERNEL"] + 12
+        timer[control_offset:control_offset + 3].copy_(torch.tensor(
+            [prepare_pack_start, prepare_pack_count, int(prepare_detail)], dtype=torch.int64, device=device))
+        torch.npu.synchronize(device)  # Complete host controls before the diagnostic call.
         outputs = adapter._profile_chunk_gated_delta_rule_fwd(q, k, v, g, beta, timer=timer, **kwargs)
         torch.npu.synchronize(device)
         # Copy raw evidence before any further launch or output-comparison failure.
@@ -87,9 +98,16 @@ def capture(q, k, v, g, beta, *, output_dir, warmup=5, check_output=False,
                         ("ASCEND_HOME_PATH", "ASCEND_CUSTOM_OPP_PATH")},
         "inputs": {name: {"shape": list(tensor.shape), "dtype": str(tensor.dtype)} for name, tensor in
                    zip(("q", "k", "v", "g", "beta"), (q, k, v, g, beta))},
-        "options": {name: {"shape": list(value.shape), "dtype": str(value.dtype)}
+        "options": {name: value.detach().cpu().reshape(-1).tolist()
+                    if name in ("cu_seqlens", "chunk_indices") and hasattr(value, "shape")
+                    else {"shape": list(value.shape), "dtype": str(value.dtype)}
                     if hasattr(value, "shape") else value for name, value in kwargs.items()},
         "warmup": warmup, "sample_count": 1,
+        "timer_data_ptr": timer.data_ptr(), "timer_words": TOTAL_BUFFER_SIZE,
+        "capture_process_id": os.getpid(),
+        "prepare_sampling": {"pack_start": prepare_pack_start, "pack_count": prepare_pack_count,
+                             "detail_enabled": prepare_detail},
+        "input_snapshot_sha256": input_snapshot_sha256,
         "cycles_per_us": cycles_per_us, "shared_clock_asserted": shared_clock,
         "header_sha256": hashlib.sha256(HEADER_PATH.read_bytes()).hexdigest(),
         "raw_sha256": hashlib.sha256(raw_path.read_bytes()).hexdigest(),
@@ -100,6 +118,8 @@ def capture(q, k, v, g, beta, *, output_dir, warmup=5, check_output=False,
     meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     if baseline is not None:
         try:
+            if len(baseline) != 10 or len(outputs) != 10:
+                raise AssertionError("GDN profiling must preserve all ten outputs")
             for index, (expected, actual) in enumerate(zip(baseline, outputs)):
                 if expected is None or actual is None:
                     if expected is not actual:
@@ -135,6 +155,9 @@ def main():
     parser.add_argument("--check-output", action="store_true")
     parser.add_argument("--cycles-per-us", type=float, help="verified GetSystemCycle frequency")
     parser.add_argument("--shared-clock", action="store_true", help="assert verified common AIC/AIV counter")
+    parser.add_argument("--prepare-pack-start", type=int, default=0)
+    parser.add_argument("--prepare-pack-count", type=int, default=8)
+    parser.add_argument("--prepare-detail", action="store_true")
     args = parser.parse_args()
     if args.parse_only is not None:
         export(args.parse_only, args.output_dir, args.cycles_per_us, args.shared_clock)
@@ -154,7 +177,10 @@ def main():
         kwargs = {key: value.to(device) if isinstance(value, torch.Tensor) else value
                   for key, value in kwargs.items()}
     capture(*inputs, output_dir=args.output_dir, warmup=args.warmup, check_output=args.check_output,
-            cycles_per_us=args.cycles_per_us, shared_clock=args.shared_clock, **kwargs)
+            cycles_per_us=args.cycles_per_us, shared_clock=args.shared_clock,
+            prepare_pack_start=args.prepare_pack_start, prepare_pack_count=args.prepare_pack_count,
+            prepare_detail=args.prepare_detail,
+            input_snapshot_sha256=hashlib.sha256(args.inputs.read_bytes()).hexdigest(), **kwargs)
 
 
 if __name__ == "__main__":

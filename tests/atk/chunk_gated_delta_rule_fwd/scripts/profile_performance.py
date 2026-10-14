@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 from datetime import datetime
+from email.parser import Parser
 import hashlib
 import json
 import math
@@ -15,6 +16,7 @@ import shutil
 import subprocess
 import sys
 from uuid import uuid4
+import zipfile
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 OP_DIR = REPO_ROOT / "tests/atk/chunk_gated_delta_rule_fwd"
@@ -52,8 +54,15 @@ def parse_args(argv=None):
     parser.add_argument("--cases", type=int, nargs="+", choices=(0, 1), default=[0, 1])
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--output-dir", type=Path, help="a new directory; defaults to ignored atk_output/")
+    parser.add_argument("--reference-wheel", type=Path,
+                        help="verify installed fla_npu against this wheel instead of workspace build staging")
     parser.add_argument("--cycles-per-us", type=float, help="verified GetSystemCycle frequency")
     parser.add_argument("--shared-clock", action="store_true", help="assert verified common AIC/AIV clock")
+    parser.add_argument("--ordinary-only", action="store_true", help="ordinary msprof only; supports an archived v2 wheel")
+    parser.add_argument("--prepare-stage35", action="store_true", help="coarse control plus detailed Prepare pack windows")
+    parser.add_argument("--prepare-pack-starts", type=int, nargs="+", default=[0, 16, 32, 48])
+    parser.add_argument("--prepare-pack-count", type=int, default=8)
+    parser.add_argument("--timer-repeats", type=int, default=1, help="repeat each diagnostic window, outside ordinary profiling")
     args = parser.parse_args(argv)
     if args.device < 0 or args.warmup < 0:
         parser.error("device and warmup must be nonnegative")
@@ -61,6 +70,11 @@ def parse_args(argv=None):
         parser.error("cycles-per-us must be a finite positive verified value")
     if args.shared_clock and args.cycles_per_us is None:
         parser.error("shared-clock requires cycles-per-us")
+    if any(not 0 <= value < 2**63 for value in args.prepare_pack_starts) or not 1 <= args.prepare_pack_count <= 8 or args.timer_repeats < 1:
+        parser.error("pack starts must be nonnegative int64, pack count 1..8, timer repeats positive")
+    if args.ordinary_only and args.prepare_stage35:
+        parser.error("ordinary-only and prepare-stage35 are mutually exclusive")
+    args.prepare_pack_starts = sorted(set(args.prepare_pack_starts))
     args.cases = sorted(set(args.cases))
     return args
 
@@ -107,11 +121,83 @@ def source_commit():
 
 
 def file_sha256(path):
-    digest = hashlib.sha256()
     with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
+        return stream_sha256(stream)
+
+
+def stream_sha256(stream):
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
     return digest.hexdigest()
+
+
+def verify_installed_wheel(wheel, package_root):
+    """Compare the installed runtime payload to an archived wheel, without importing CANN."""
+    wheel = Path(wheel).resolve()
+    package_root = Path(package_root).resolve()
+    if wheel.suffix != ".whl" or not wheel.is_file():
+        raise ValueError(f"Reference wheel must be an existing .whl file: {wheel}")
+    vendor = "opp/vendors/fla_npu_transformer/"
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            members = {}
+            for info in archive.infolist():
+                if info.is_dir() or not info.filename.startswith("fla_npu/"):
+                    continue
+                relative = info.filename[len("fla_npu/"):]
+                parts = relative.split("/")
+                if "\\" in relative or ":" in relative or any(part in ("", ".", "..") for part in parts):
+                    raise ValueError(f"Invalid runtime path in reference wheel: {info.filename}")
+                if relative in members:
+                    raise ValueError(f"Duplicate runtime path in reference wheel: {info.filename}")
+                members[relative] = info
+            kernels = [name for name in members
+                       if name.startswith(vendor + "op_impl/ai_core/tbe/kernel/") and name.endswith(".o")]
+            if vendor + "op_api/lib/libcust_opapi.so" not in members or not kernels:
+                raise ValueError("Reference wheel must contain libcust_opapi.so and compiled kernel .o files")
+            metadata_names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+            if len(metadata_names) != 1:
+                raise ValueError("Reference wheel must contain exactly one distribution METADATA")
+            distribution = Parser().parsestr(archive.read(metadata_names[0]).decode("utf-8"))
+            if not distribution.get("Name") or not distribution.get("Version"):
+                raise ValueError("Reference wheel METADATA must contain Name and Version")
+            for relative, info in sorted(members.items()):
+                installed = package_root.joinpath(*relative.split("/"))
+                if not installed.resolve().is_relative_to(package_root) or not installed.is_file():
+                    raise RuntimeError(f"Installed wheel file missing or outside package: {installed}")
+                with archive.open(info) as stream:
+                    expected_hash = stream_sha256(stream)
+                if file_sha256(installed) != expected_hash:
+                    raise RuntimeError(f"Installed file differs from reference wheel: {installed}")
+            # pip can create bytecode caches; extra native libraries/kernels can select stale code.
+            for installed in package_root.rglob("*"):
+                if installed.is_file() and installed.suffix in (".so", ".o"):
+                    if installed.relative_to(package_root).as_posix() not in members:
+                        raise RuntimeError(f"Unexpected installed native file absent from reference wheel: {installed}")
+    except zipfile.BadZipFile as error:
+        raise ValueError(f"Invalid reference wheel archive: {wheel}") from error
+    return {"mode": "reference_wheel", "path": str(wheel), "sha256": file_sha256(wheel),
+            "distribution": distribution["Name"], "version": distribution["Version"],
+            "package_root": str(package_root), "checked_files": len(members),
+            "checked_kernel_objects": len(kernels)}
+
+
+def verify_profile_artifacts(reference_wheel, vendor, log_path, env):
+    if reference_wheel is None:
+        run_logged([sys.executable, str(REPO_ROOT / "scripts/verify_libcust_opapi_md5.py"), "--python"],
+                   log_path, env)
+        return {"mode": "build_staging"}
+    with log_path.open("w", encoding="utf-8") as log:
+        try:
+            result = verify_installed_wheel(reference_wheel, vendor.parents[2])
+        except (OSError, ValueError, RuntimeError) as error:
+            log.write(f"Reference wheel verification failed: {error}\n")
+            raise
+        summary = json.dumps(result, indent=2)
+        log.write(summary + "\n")
+    print("Installed artifacts match reference wheel:", summary, flush=True)
+    return result
 
 
 def verify_performance_evidence(perf_dir, case_ids):
@@ -172,6 +258,21 @@ def verify_atk_launcher(env):
     return launcher
 
 
+def diagnostic_plan(args):
+    if getattr(args, "ordinary_only", False):
+        return []
+    if not getattr(args, "prepare_stage35", False):
+        return [dict(name="", pack_start=0, pack_count=8, detail=False)]
+    plan = []
+    for repeat in range(args.timer_repeats):
+        # Same selection with detail off/on checks added instrumentation overhead.
+        for start in args.prepare_pack_starts:
+            for detail in (False, True):
+                plan.append(dict(name=f"{'detail' if detail else 'coarse'}_pack{start}_r{repeat}",
+                                 pack_start=start, pack_count=args.prepare_pack_count, detail=detail))
+    return plan
+
+
 def run_profile(args):
     tag = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:8]
     output = (args.output_dir or OP_DIR / "atk_output" / ("gdn_timer_" + tag)).resolve()
@@ -182,7 +283,12 @@ def run_profile(args):
     metadata = {"status": "running", "soc": SOC, "python": sys.executable,
                 "device": args.device, "case_ids": args.cases, "warmup": args.warmup,
                 "cycles_per_us": args.cycles_per_us, "shared_clock_asserted": args.shared_clock,
-                "source_commit": source_commit()}
+                "source_commit": source_commit(), "source_commit_role": "profiling_checkout",
+                "artifact_check_mode": "reference_wheel" if args.reference_wheel else "build_staging"}
+    metadata["diagnostic_plan"] = diagnostic_plan(args)
+    metadata["ordinary_only"] = getattr(args, "ordinary_only", False)
+    if args.reference_wheel:
+        metadata["reference_wheel"] = {"path": str(args.reference_wheel.resolve())}
 
     def write_metadata():
         metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
@@ -223,11 +329,15 @@ def run_profile(args):
             ([sys.executable, "-c", ATK_PROBE], "atk_environment.log"),
             (["npu-smi", "info"], "npu_info.log"),
             ([sys.executable, str(REPO_ROOT / "scripts/check_npu_env.py")], "environment.log"),
-            ([sys.executable, str(REPO_ROOT / "scripts/verify_libcust_opapi_md5.py"), "--python"], "installed_artifacts.log"),
-            ([sys.executable, "-c", SYMBOL_PROBE], "profile_symbols.log"),
         ]
         for command, filename in checks:
             run_logged(command, output / filename, env)
+        artifacts = verify_profile_artifacts(args.reference_wheel, vendor, output / "installed_artifacts.log", env)
+        if args.reference_wheel:
+            metadata["reference_wheel"] = artifacts
+        write_metadata()
+        if not metadata["ordinary_only"]:
+            run_logged([sys.executable, "-c", SYMBOL_PROBE], output / "profile_symbols.log", env)
         run_logged(["bash", str(REPO_ROOT / "tests/atk/run_test_cpu.sh"),
                     "-op=chunk_gated_delta_rule_fwd", f"-npu_device_id={args.device}",
                     f"-soc={SOC}", "-scope=performance"], output / "atk_performance.log", env)
@@ -241,22 +351,36 @@ def run_profile(args):
                                     for case_id, path in snapshots.items()}
         write_metadata()
         for case_id, snapshot in snapshots.items():
-            case_output = output / "timer" / f"case_{case_id}"
-            command = [sys.executable, str(UT_DIR / "profile_gdn.py"), "--inputs", str(snapshot),
-                       "--device", str(args.device), "--warmup", str(args.warmup), "--check-output",
-                       "--output-dir", str(case_output)]
-            if args.cycles_per_us is not None:
-                command += ["--cycles-per-us", str(args.cycles_per_us)]
-            if args.shared_clock:
-                command += ["--shared-clock"]
-            run_logged(command, case_output / "profiling.log", env)
-            expected = ["gdn_npu_time_raw.csv", "gdn_npu_time_parsed.csv", "timer_layout.json", "capture_metadata.json"]
-            if args.shared_clock:
-                expected.append("gdn_npu_time.json")
-            for filename in expected:
-                path = case_output / filename
-                if not path.is_file() or path.stat().st_size == 0:
-                    raise RuntimeError(f"Profiling output is missing or empty: {path}")
+            case_root = output / "timer" / f"case_{case_id}"
+            captures = []
+            for window in metadata["diagnostic_plan"]:
+                case_output = case_root / window["name"] if window["name"] else case_root
+                command = [sys.executable, str(UT_DIR / "profile_gdn.py"), "--inputs", str(snapshot),
+                           "--device", str(args.device), "--warmup", str(args.warmup), "--check-output",
+                           "--output-dir", str(case_output),
+                           "--prepare-pack-start", str(window["pack_start"]),
+                           "--prepare-pack-count", str(window["pack_count"])]
+                if window["detail"]:
+                    command += ["--prepare-detail"]
+                if args.cycles_per_us is not None:
+                    command += ["--cycles-per-us", str(args.cycles_per_us)]
+                if args.shared_clock:
+                    command += ["--shared-clock"]
+                run_logged(command, case_output / "profiling.log", env)
+                expected = ["gdn_npu_time_raw.csv", "gdn_npu_time_parsed.csv", "timer_layout.json", "capture_metadata.json"]
+                if args.shared_clock:
+                    expected.append("gdn_npu_time.json")
+                for filename in expected:
+                    path = case_output / filename
+                    if not path.is_file() or path.stat().st_size == 0:
+                        raise RuntimeError(f"Profiling output is missing or empty: {path}")
+                run_logged([sys.executable, str(UT_DIR / "summarize_timer.py"), str(case_output)],
+                           case_output / "summary.log", env)
+                captures.append(case_output)
+            if getattr(args, "prepare_stage35", False):
+                run_logged([sys.executable, str(UT_DIR / "analyze_prepare_stage35.py"),
+                            *map(str, captures), "--output-dir", str(case_root / "stage35_analysis")],
+                           case_root / "stage35_analysis.log", env)
         metadata["status"] = "complete"
         write_metadata()
     except Exception as error:
