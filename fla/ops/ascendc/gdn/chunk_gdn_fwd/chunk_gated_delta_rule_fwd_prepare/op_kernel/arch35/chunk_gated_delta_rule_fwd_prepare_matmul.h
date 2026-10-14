@@ -95,6 +95,42 @@ __aicore__ inline void MatmulToL0C(AscendC::LocalTensor<InDtype> l1A,
     MmadL0ABToL0C<InDtype>(l0A, l0B, l0C, m, n, k, initC, evt);
 }
 
+// Solve-only FP32 tiles: logical M=N=64, K=32, backed by full 64x64 L1 NZ.
+// With transpose, select source rows (32x64 -> 64x32); without transpose,
+// select source columns (64x32). Both A and B use the same descriptor here:
+// B's packed NZ view is the transpose of logical [K,N] in L0B Zn.
+// dstStride stays 4 even when source mStep=2: the destination retains all
+// 64 output rows/columns. Each load fills exactly the first 8 KiB of its
+// existing 16 KiB L0 bank. See docs/prepare_k32_design.md in the fused op.
+template <bool TransposeInputs, bool SecondHalf>
+__aicore__ inline void FillSolveHalfKLoad(AscendC::LoadData2DParamsV2 &p)
+{
+    if constexpr (TransposeInputs) {
+        FillLoad2D(p, 2, 8, 4, 4, true);
+        p.mStartPosition = SecondHalf ? 2 : 0;
+    } else {
+        FillLoad2D(p, 4, 4, 4, 4, false);
+        p.kStartPosition = SecondHalf ? 4 : 0;
+    }
+}
+
+template <bool TransposeInputs, bool SecondHalf>
+__aicore__ inline void SolveHalfKMatmulToL0C(AscendC::LocalTensor<float> l1A,
+                                            AscendC::LocalTensor<float> l1B,
+                                            AscendC::LocalTensor<float> l0A,
+                                            AscendC::LocalTensor<float> l0B,
+                                            AscendC::LocalTensor<float> l0C,
+                                            bool initC, uint8_t evt)
+{
+    AscendC::LoadData2DParamsV2 load;
+    FillSolveHalfKLoad<TransposeInputs, SecondHalf>(load);
+    AscendC::LoadData(l0A, l1A, load);
+    AscendC::LoadData(l0B, l1B, load);
+    SetFlag<AscendC::HardEvent::MTE1_M>(evt);
+    WaitFlag<AscendC::HardEvent::MTE1_M>(evt);
+    MmadL0ABToL0C<float>(l0A, l0B, l0C, kChunk64, kChunk64, kVcs32, initC, evt);
+}
+
 // C = A[m,k] @ B[k,n]. One MMAD. A is 64x64 (kStep=4). B is 64x128
 // (isTranspose, kStep=8, dstStride=8). MMAD k stays kDim.
 template <typename InDtype>

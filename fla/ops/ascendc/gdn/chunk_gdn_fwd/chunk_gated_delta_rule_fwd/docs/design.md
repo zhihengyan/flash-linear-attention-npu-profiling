@@ -18,4 +18,8 @@
 
 所有细分 scope 使用 NoBarrier，等待项以原 wait 返回为锚点；matmul/VF/epilogue 调用窗含原内部同步，不能称纯计算完成时延。固定总窗包含末尾诊断 drain；GM 发布在结束戳之后。ENABLE_TIMER=0 移除实际 scope/Init/Finish 操作；正常 null timer 不读时钟、不写 GM、不 drain。开关 A/B 的真实打点开销留待设备测量。
 
-验证入口及状态统一见 [timer_run.md](timer_run.md)、[timer_report.md](timer_report.md)。本轮没有性能优化目标，也不修改原性能 case 的 shape 或比较标准。
+上述计时接入的验证入口及状态统一见 [timer_run.md](timer_run.md)、[timer_report.md](timer_report.md)。计时接入本身没有性能优化目标，也不修改原性能 case 的 shape 或比较标准。
+
+## 后续性能候选：Prepare Stage4/5 K32
+
+从 `codex/gdn-profiling` 出发的独立实验在三个 FP32 求解乘法中只归约 leaf 的有效32个 K 元素。候选详设、物理布局与同步边界见 [prepare_k32_design.md](prepare_k32_design.md)，开发期证据和设备待验项见 [validation.md](validation.md)。该候选保持现有计时 ABI 和布局，尚未获得设备精度/性能验收，也未替代上述诊断接入基线。
