@@ -24,6 +24,8 @@
 
 方案设计规则版本：V2。编码分支 `codex/gdn-stage6-overlap` 从 `codex/gdn-profiling` 的 `809bce6887639e831caa856b8ac3a197a6a94294` 创建。用户已确认进行该候选编码；是否正式采用仍以设备精度和性能结果为准。公开 GDN 和独立 Prepare 的接口沿用原实现与 [Prepare README](../../chunk_gated_delta_rule_fwd_prepare/README.md)，不增加公开开关、参数或 TilingKey。
 
+2026-10-13 实验决定：用户将采用门槛设为普通七项 kernel 时间和至少下降 5%。B1 与 A0 基本持平，候选停止实验、未采用；以下保留方案供追溯，后续优化使用基线 A。测量及决定见 [B1 分析](timer_analysis_stage6_b1_2026-10-13.md) 和 [validation.md](validation.md)。本次决定不回滚实验分支中的 kernel。
+
 ### 目标与实验范围
 
 本次只调整共享 Prepare Arch35 `Stage6_AivOne` 内 K 输入 DataCopy 的下发位置。目标是用户 case 0：`B=1,Hk=16,Hv=32,T=11274,K=V=128,BT=64`，varlen、初态 FP32、输出最终状态；基线见 [case 0 分析](timer_analysis_case0_2026-10-13.md)。普通 Prepare/H/O 均值为 715.090/588.803/359.376 us，七项 kernel 时间和均值为 1708.391 us。Stage6 采样包含原等待，无法据此定量预估可隐藏的 K 搬运时间；本次是待实测候选，不填写预计必达提升。
