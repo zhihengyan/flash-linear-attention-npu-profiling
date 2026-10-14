@@ -64,6 +64,8 @@ python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py \
 
 安装后开启新测试进程。ordinary-only仍运行普通ATK/msprof、保存输入和wheel身份，跳过Profile符号和timer，可使用原v2 A包。新v3诊断主入口也先采普通性能；据同条件重复结果核对普通调用是否退化，历史A0只作背景。
 
+参考wheel校验支持根目录fla_npu/和当前平台包的&lt;dist&gt;.data/purelib/fla_npu/、platlib对应目录，统一按pip安装后的路径匹配并逐文件校验SHA256。c7d2f155旧采集脚本只识别根目录，可能误报“Reference wheel must contain libcust_opapi.so and compiled kernel .o files”；遇到这一情况更新本入口脚本即可，继续使用原已安装的c7d2f155 wheel，无需为此重编/重装。重复映射、路径越界、真正缺产物或安装内容不一致仍会拒绝。
+
 读取顺序：先看扰动与采样有效性，再比较两个稳定期区段的S3_KKT_WAIT/S3_POST_KKT与S4_INPUT_WAIT，之后看S3_LEAF_SOLVE、Y完成等待/回读、A transfer及S7_A_READY_WAIT。后者在原Stage6输入等待之后，只显示此时剩余的A依赖。PREPARE_PACK包含上一pack的AIV写回；最后当前pack写回在循环外，不是本pack输出完成时延。issue窗含原内部等待且可嵌套，不能累加为纯计算或全算子时间。本轮先定位，确认候选后再另开优化分支。
 
 ## 安装后通用主入口

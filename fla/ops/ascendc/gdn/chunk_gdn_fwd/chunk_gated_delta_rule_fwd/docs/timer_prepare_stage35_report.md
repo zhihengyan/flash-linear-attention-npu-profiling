@@ -32,3 +32,11 @@
 PREPARE_PACK包含上一pack的AIV写回，最后当前pack写回在循环外；这是循环下发窗，不是当前pack输出完成时延。S7_A_READY_WAIT只观测原Stage6输入等待之后的剩余A依赖，不能代表完整A延迟。issue窗包含原内部等待，父子窗可嵌套；不能据窗口统计外推全工作量或85us收益。
 
 验收仍为同条件重复普通七项时间和至少下降5%：原1708.3914us需节省85.41957us，若单靠Prepare约需下降11.95%。若诊断稳定期和pipe证据不足以支持该预算，停止该候选；本轮没有提前选择求解公式、dtype或Y/A布局优化。
+
+## 参考wheel路径校验修复
+
+最终本地验证：13项归档wheel合同测试、全部59项诊断离线测试通过（19.264s）；git diff --check通过。路径布局兼容不降低原产物完整性或逐文件SHA256校验。
+
+用户报告c7d2f155平台wheel被误判为缺libcust_opapi.so/内核.o。定位到采集器只识别压缩包根目录fla_npu/，漏掉本仓setup.py标记Root-Is-Purelib:false时build_py产生的&lt;dist&gt;.data/purelib/fla_npu/；scripts/check_pypi_wheel.py::_install_path已经定义了同类安装路径映射。用该实际布局的合成wheel复现相同异常，再修复采集器按pip安装路径映射，保留原ZIP成员读取和完整哈希验证。
+
+新增3项回归，覆盖purelib/platlib通过、重定位内核字节不一致拒绝、根目录与重定位重复映射/路径越界拒绝；原10项归档wheel测试保留。只修改外部采集入口及测试/说明，不改内核、host、timer布局或wheel打包。旧c7d2f155 wheel可继续安装/引用，仅需同步新的profile_performance.py。原独立审核中的采集器指纹属于c7d2f155原版本；内核审核证据不因本次入口路径修复而改变。真实用户wheel尚未在本机读取，本轮验证为可复现的包结构离线测试，NPU实测仍待内部运行。

@@ -11,6 +11,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -132,6 +133,17 @@ def stream_sha256(stream):
     return digest.hexdigest()
 
 
+def wheel_installed_path(name):
+    """Map wheel purelib/platlib members as pip does; retain archive names for reads.
+
+    The root build sets Root-Is-Purelib:false while build_py remains pure, so
+    current platform wheels stage fla_npu under <dist>.data/purelib/.
+    This matches scripts/check_pypi_wheel.py::_install_path.
+    """
+    match = re.fullmatch(r"[\w.+-]+\.data/(?:purelib|platlib)/(.+)", name)
+    return match.group(1) if match else name
+
+
 def verify_installed_wheel(wheel, package_root):
     """Compare the installed runtime payload to an archived wheel, without importing CANN."""
     wheel = Path(wheel).resolve()
@@ -143,9 +155,10 @@ def verify_installed_wheel(wheel, package_root):
         with zipfile.ZipFile(wheel) as archive:
             members = {}
             for info in archive.infolist():
-                if info.is_dir() or not info.filename.startswith("fla_npu/"):
+                installed_path = wheel_installed_path(info.filename)
+                if info.is_dir() or not installed_path.startswith("fla_npu/"):
                     continue
-                relative = info.filename[len("fla_npu/"):]
+                relative = installed_path[len("fla_npu/"):]
                 parts = relative.split("/")
                 if "\\" in relative or ":" in relative or any(part in ("", ".", "..") for part in parts):
                     raise ValueError(f"Invalid runtime path in reference wheel: {info.filename}")

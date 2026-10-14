@@ -33,13 +33,41 @@ class WheelReferenceContract(unittest.TestCase):
             path.write_bytes(content)
         self.wheel = self.make_wheel("A.whl", self.payload)
 
-    def make_wheel(self, filename, payload):
+    def make_wheel(self, filename, payload, prefix=""):
         path = self.root / filename
         with zipfile.ZipFile(path, "w") as archive:
             for relative, content in payload.items():
-                archive.writestr("fla_npu/" + relative, content)
+                archive.writestr(prefix + "fla_npu/" + relative, content)
             archive.writestr("fla_npu-0.1.dist-info/METADATA", "Name: fla-npu\nVersion: 0.1\n")
         return path
+
+    def test_pip_relocated_payload_layouts(self):
+        # Root-Is-Purelib:false + build_py stages the current root wheel here.
+        for scheme in ("purelib", "platlib"):
+            with self.subTest(scheme=scheme):
+                wheel = self.make_wheel(
+                    f"{scheme}.whl", self.payload,
+                    f"flash_linear_attention_npu_a5-26.10.0+codex.gdn.prepare.stage3.5.timer.devc7d2f15.data/{scheme}/")
+                result = collector.verify_installed_wheel(wheel, self.package)
+                self.assertEqual(result["checked_files"], len(self.payload))
+                self.assertEqual(result["checked_kernel_objects"], 1)
+
+    def test_relocated_kernel_mismatch_still_rejected(self):
+        wheel = self.make_wheel("relocated.whl", self.payload, "fla_npu-0.1.data/purelib/")
+        (self.package / KERNEL).write_bytes(b"stale kernel")
+        with self.assertRaisesRegex(RuntimeError, "differs.*prepare.o"):
+            collector.verify_installed_wheel(wheel, self.package)
+
+    def test_relocated_payload_collision_and_traversal_rejected(self):
+        wheel = self.make_wheel("collision.whl", self.payload)
+        with zipfile.ZipFile(wheel, "a") as archive:
+            archive.writestr("fla_npu-0.1.data/purelib/fla_npu/" + KERNEL, b"collision")
+        with self.assertRaisesRegex(ValueError, "Duplicate runtime path"):
+            collector.verify_installed_wheel(wheel, self.package)
+        payload = dict(self.payload, **{"../outside.so": b"invalid"})
+        wheel = self.make_wheel("traversal.whl", payload, "fla_npu-0.1.data/platlib/")
+        with self.assertRaisesRegex(ValueError, "Invalid runtime path"):
+            collector.verify_installed_wheel(wheel, self.package)
 
     def test_archived_a_ignores_b_staging_and_records_identity(self):
         staging = self.root / "build/lib/fla_npu" / KERNEL
