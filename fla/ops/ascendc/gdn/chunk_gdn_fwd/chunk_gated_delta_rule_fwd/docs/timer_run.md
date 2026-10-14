@@ -53,6 +53,22 @@ python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py \
 
 优先提供run_metadata.json、stage35_analysis/brief.txt和perturbation.csv；不足时再补window_stage_summary.csv。无需传raw。若粗/细窗口变化明显或不一致，先降低粒度/补pipe信息；工具不把任何窗口当launch耗时占比或收益上限。这里的扰动比较仅覆盖固定结束戳之前，Finish之后的count/tag发布与DCCI不在窗口内。
 
+### 文件过大时只导出一份文本
+
+task_summary.csv和pack_summary.csv是内部定点分析明细，window_stage_summary.csv按每capture展开；三者均不必全量带出。已有brief.txt可先用于首轮讨论。新版主入口还自动生成share_brief.txt，合并同采样区段的重复轮次，同时保留重复范围和各capture的p95上界/max，当前默认目录结构通常约几十行。
+
+对已完成的本轮结果，只需同步独立工具compact_prepare_stage35.py，读取现有stage35_analysis/summary.json。无torch/CANN依赖，不重读raw/parsed或task/pack明细，不重编、不重装、不重跑NPU。RUN_DIR指含run_metadata.json的结果根目录：
+
+```bash
+UT=fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut
+python "$UT/compact_prepare_stage35.py" "$RUN_DIR/timer/case_0/stage35_analysis" \
+  --run-metadata "$RUN_DIR/run_metadata.json"
+```
+
+生成同目录share_brief.txt，只需带出这一份。工具保留旧文件，重复执行需--output指定新文件。run-metadata可省略；省略时只有诊断信息。提供同一次单case且输入SHA匹配的run metadata时，附普通Prepare/H/O/Cast/合并三Transpose的统计；计数满足每调用七项比例才给kernel均值和，不推断总p95或host端到端时间。多case混合metadata省略普通统计，防止错归因。
+
+表格m是各capture调用median的中位数，方括号为重复轮次范围；p是各capture p95的最大值，x是调用最大值，n为跨轮次样本调用数。它们不是重新混合样本后计算的分位数。未观察到的阶段显示“-”，不当作零耗时。原大表留内部，后续若需要某个核/work ID再定点筛选。
+
 粗/细同v3对照也不能排除整个计时实现改变编译资源。可安装保存好的旧A wheel，用同一新入口单采普通性能：
 
 ```bash

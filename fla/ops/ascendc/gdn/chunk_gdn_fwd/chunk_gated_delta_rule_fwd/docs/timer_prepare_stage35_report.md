@@ -40,3 +40,11 @@ PREPARE_PACK包含上一pack的AIV写回，最后当前pack写回在循环外；
 用户报告c7d2f155平台wheel被误判为缺libcust_opapi.so/内核.o。定位到采集器只识别压缩包根目录fla_npu/，漏掉本仓setup.py标记Root-Is-Purelib:false时build_py产生的&lt;dist&gt;.data/purelib/fla_npu/；scripts/check_pypi_wheel.py::_install_path已经定义了同类安装路径映射。用该实际布局的合成wheel复现相同异常，再修复采集器按pip安装路径映射，保留原ZIP成员读取和完整哈希验证。
 
 新增3项回归，覆盖purelib/platlib通过、重定位内核字节不一致拒绝、根目录与重定位重复映射/路径越界拒绝；原10项归档wheel测试保留。只修改外部采集入口及测试/说明，不改内核、host、timer布局或wheel打包。旧c7d2f155 wheel可继续安装/引用，仅需同步新的profile_performance.py。原独立审核中的采集器指纹属于c7d2f155原版本；内核审核证据不因本次入口路径修复而改变。真实用户wheel尚未在本机读取，本轮验证为可复现的包结构离线测试，NPU实测仍待内部运行。
+
+## 小文本导出
+
+本地验证：6项新增压缩/统计/身份/文件保留回归通过；完整65项离线测试通过（19.412s），独立入口--help通过。默认4窗口/2轮/完整32类型的合成导出低于70行、12KB；实际行数依阶段核型和普通统计而变，不以合成数据冒充本轮实测。
+
+新增标准库工具compact_prepare_stage35.py，从既有summary.json生成share_brief.txt；旧结果直接导出，无需重新采集或复制逐task/pack大表。新版主入口自动附同run的普通msprof小统计并输出该文本，保留既有全部明细。重复capture的median范围、p95上界、max和样本数各自保持原含义，不从分位数推导混合分位数；普通七项均值仅在单case/input SHA与完整计数比例吻合时输出，不合成总p95。
+
+内核/host/timer布局未变，旧c7d2f155 wheel及v1分析summary均可复用。本轮仅修改Python分析/导出与说明；原独立源码审核的内核证据保留，分析器/采集器指纹为历史版本，不把这次导出修改说成设备复测。

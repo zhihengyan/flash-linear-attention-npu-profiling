@@ -392,7 +392,8 @@ def run_profile(args):
                 captures.append(case_output)
             if getattr(args, "prepare_stage35", False):
                 run_logged([sys.executable, str(UT_DIR / "analyze_prepare_stage35.py"),
-                            *map(str, captures), "--output-dir", str(case_root / "stage35_analysis")],
+                            *map(str, captures), "--output-dir", str(case_root / "stage35_analysis"),
+                            "--run-metadata", str(metadata_path)],
                            case_root / "stage35_analysis.log", env)
         metadata["status"] = "complete"
         write_metadata()

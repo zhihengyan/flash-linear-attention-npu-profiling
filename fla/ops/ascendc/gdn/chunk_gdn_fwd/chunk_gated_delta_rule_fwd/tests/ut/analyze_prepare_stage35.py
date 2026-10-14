@@ -13,6 +13,7 @@ import statistics
 import sys
 
 from summarize_timer import analyze, dump_csv, read_events, stats, union_cycles
+from compact_prepare_stage35 import render_compact
 
 S3 = ["S3_KKT_WAIT", "S3_GATE_MUL", "S3_L_READY_WAIT", "S3_LEAF_PACK",
       "S3_PACK_READY_WAIT", "S3_NEG_L_UPLOAD", "S3_LEAF_SOLVE",
@@ -335,6 +336,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("captures", nargs="+", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--run-metadata", type=Path, help="optional same run's ordinary msprof evidence for share_brief")
     args = parser.parse_args(argv)
     try:
         result = combine([analyze_capture(c) for c in args.captures])
@@ -346,6 +348,8 @@ def main(argv=None):
         dump_union_csv(args.output_dir / "pack_summary.csv", result["packs"])
         small = {k: v for k, v in result.items() if k not in ("tasks", "packs")}
         (args.output_dir / "summary.json").write_text(json.dumps(small, indent=2, allow_nan=False), encoding="utf-8")
+        metadata = json.loads(args.run_metadata.read_text(encoding="utf-8")) if args.run_metadata else None
+        (args.output_dir / "share_brief.txt").write_text(render_compact(small, metadata), encoding="utf-8")
         print(brief(result), end="")
         print("Files:", args.output_dir)
     except (OSError, ValueError, KeyError, TypeError) as error:

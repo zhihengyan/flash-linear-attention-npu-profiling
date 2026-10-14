@@ -6,6 +6,8 @@
 
 本分支升级为布局v3：Prepare按每核选定pack窗口，H/O/Phase6保留前32调用；iteration为密集采样槽，新Prepare细分stage有原work ID。主入口追加 --prepare-stage35 --timer-repeats 2，自动粗/细成对采样并运行analyze_prepare_stage35.py，输出跨窗口brief、perturbation、stage及同核任务/pack汇总。旧v2 raw使用gdn-profiling分支解析。设计与当前验证见 [诊断设计](../../docs/timer_prepare_stage35_design.md)、[本轮记录](../../docs/timer_prepare_stage35_report.md)。
 
+表格难以带出时，只需share_brief.txt。独立compact_prepare_stage35.py从已生成的stage35_analysis/summary.json再导出，可选同run的--run-metadata以附普通性能小统计；无需raw、torch/CANN、编译或重采。新版主入口自动生成，旧结果的命令见[timer_run.md](../../docs/timer_run.md#文件过大时只导出一份文本)。
+
 test_timer_contract.py 的离线合同测试与 check_timer_source.py 的源码/同步/ABI 检查无需 NPU。它们不能替代 CANN 构建、ATK 精度/确定性/内存、Example/ST 或真实打点开销验证。
 
 数据不能带出内部环境时，运行 `python summarize_timer.py /实际case目录`，在 analysis/ 生成可粘贴的 brief.txt 和留在内部的阶段/逐核表。只读取原 parsed.csv 与元数据，不需要 raw、torch/CANN 或重编。具体分析顺序及等待/重叠/截断解释见 [timer_analysis.md](../../docs/timer_analysis.md)。

@@ -246,6 +246,7 @@ class TaskCorrelation(unittest.TestCase):
             out = Path(directory) / "analysis"
             self.assertEqual(a.main(["coarse", "detail", "--output-dir", str(out)]), 0)
             self.assertTrue((out / "perturbation.csv").is_file())
+            self.assertTrue((out / "share_brief.txt").is_file())
             self.assertLess((out / "brief.txt").stat().st_size, 5000)
             self.assertEqual(a.main(["coarse", "detail", "--output-dir", str(out)]), 1)
 
