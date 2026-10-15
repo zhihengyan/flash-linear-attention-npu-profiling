@@ -1,16 +1,19 @@
 # Prepare K32 开发期验证记录
 
-初始日期：2026-10-14；实测分析更新：2026-10-15。候选分支 `codex/gdn-prepare-k32`，从 `codex/gdn-profiling` / `809bce6887639e831caa856b8ac3a197a6a94294` 创建。方案见 [prepare_k32_design.md](prepare_k32_design.md)。当前完成候选设计、编码、离线检查和用户提供的三轮普通性能分析；用户报告本轮精度测试全部通过。相对历史A0七kernel合计均值下降5.623%，新鲜A基线下的5%收益及完整ATK正式验收仍待完成。本记录保留至设备验收完成，届时按阶段05收敛结果至对应 ATK README。
+初始日期：2026-10-14；实测分析更新：2026-10-15。候选分支 `codex/gdn-prepare-k32`，从 `codex/gdn-profiling` / `809bce6887639e831caa856b8ac3a197a6a94294` 创建。方案见 [prepare_k32_design.md](prepare_k32_design.md)。当前完成候选设计、编码、离线检查、三轮B及三轮同日A的普通性能分析；用户报告本轮精度测试全部通过。case0七kernel合计均值相对同日A下降5.424%，达到≥5%均值目标；完整支持范围的ATK正式验收仍待完成。本记录保留至设备验收完成，届时按阶段05收敛结果至对应 ATK README。
 
 ## 性能追踪
 
 | 版本 | 主变量 | 证据 | 判断 |
 | --- | --- | --- | --- |
-| A0，历史基线 | 原 K64 求解，未采用 Stage6/H 实验 | 普通调用20组，七 kernel均值1708.3914us；Prepare715.08995us | 预算参考，需同环境新鲜 A |
+| A0，历史基线 | 原 K64 求解，未采用 Stage6/H 实验 | 普通调用20组，七 kernel均值1708.3914us；Prepare715.08995us | 保留历史预算参考；当前以同日A作为主对照 |
 | msopprof_r0 | 原始实现 Prepare replay | 708.430969us；AIC Cube77.56251%、MTE1 23.2370% | 支持尝试计算/加载减量，不能替代普通性能基线 |
-| B1/B2/B3，K32 候选 | 三处 FP32 MMAD 使用有效半区 K | 用户报告精度通过；各20组普通调用，七项均值1613.28590/1612.17790/1611.52665us，合并1612.33015us；Prepare620.64430us | 相对历史A0下降5.623%，Prepare下降13.208%；建议保留候选并补新鲜A对照 |
+| 同日A1/A2/A3 | 用户安装原始A0 wheel复测 | 各20组，七项均值1705.45645/1704.92515/1704.02030us，合并1704.80063us；Prepare714.91452us | 新鲜A对照已完成；相对历史A0快0.2102% |
+| B1/B2/B3，K32 候选 | 三处 FP32 MMAD 使用有效半区 K | 用户报告精度通过；各20组普通调用，七项均值1613.28590/1612.17790/1611.52665us，合并1612.33015us；Prepare620.64430us | 相对同日A下降5.424%，Prepare下降13.186%；已测最保守轮均值组合下降5.325%，建议保留 |
 
-三轮CSV与各自metadata的140行名称/耗时完全匹配，四轮输入hash及case JSON hash相同。B数据对应优化提交 `dd707730627b29b1862fd335dfbc76e7f0e2666d`。收益归因、逐kernel/逐轮分布、5%余量和数据边界见 [timer_analysis_k32_b1_b3_2026-10-15.md](timer_analysis_k32_b1_b3_2026-10-15.md)。本批未带出构建/安装/频率日志及精度case报告，不据此宣布完整设备验收完成；case1等其它支持场景尚无本候选的新结果。
+首批B三轮CSV与各自metadata的140行名称/耗时完全匹配，含历史A0的四轮输入hash及case JSON hash相同。B数据对应优化提交 `dd707730627b29b1862fd335dfbc76e7f0e2666d`。历史对比的收益归因、逐kernel/逐轮分布和数据边界见 [timer_analysis_k32_b1_b3_2026-10-15.md](timer_analysis_k32_b1_b3_2026-10-15.md)。尚未带出构建/安装/频率日志及精度case报告，不据此宣布完整设备验收完成；case1等其它支持场景尚无本候选的新结果。
+
+最新同日复核见 [timer_analysis_k32_same_day_ab_2026-10-15.md](timer_analysis_k32_same_day_ab_2026-10-15.md)：新增三份A CSV也与各自metadata完全匹配，全部七轮输入hash及case JSON hash相同；A/B各60组，净节省92.47048us，5%余量7.23045us。p95降幅4.956%、B逐调用波动较大，当前达标结论针对既定均值指标。新A的采集checkout提交为3b0664fc，本地无该对象，A身份按用户明确说明的原始A0 wheel记录，wheel版本/安装校验信息仍需随正式归档保留。新鲜A复核项已完成，下一步聚焦其它支持场景回归。
 
 普通性能固定统计 Cast、三次 Transpose、Prepare、H、O 七个 kernel 的 `op_summary.csv` / `Task Duration(us)`；以每次调用七行之和计算分布，再比较重复运行的均值、中位数和波动。不得把 timer scope sum、pipe占比或 msopprof replay 当性能验收值。首轮仅 case0；case1及其它支持场景在正式接受前回归。
 
