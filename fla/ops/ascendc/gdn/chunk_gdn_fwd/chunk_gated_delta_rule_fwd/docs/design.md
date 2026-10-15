@@ -22,4 +22,8 @@
 
 ## 后续性能候选：Prepare Stage4/5 K32
 
-从 `codex/gdn-profiling` 出发的独立实验在三个 FP32 求解乘法中只归约 leaf 的有效32个 K 元素。候选详设、物理布局与同步边界见 [prepare_k32_design.md](prepare_k32_design.md)，开发期证据和设备待验项见 [validation.md](validation.md)。该候选保持现有计时 ABI 和布局，尚未获得设备精度/性能验收，也未替代上述诊断接入基线。
+从 `codex/gdn-profiling` 出发的独立实验在三个 FP32 求解乘法中只归约 leaf 的有效32个 K 元素。候选详设、物理布局与同步边界见 [prepare_k32_design.md](prepare_k32_design.md)，开发期证据和设备待验项见 [validation.md](validation.md)。用户报告精度测试全过；同日三轮 A/B 的普通七项均值下降5.424%，K32 保留为后续探索基线。完整支持范围、case1、MSS和确定性等正式验收尚未全部完成，不以此替代上述诊断设计或扩大验收结论。
+
+## K32 后续路径探索（阶段03）
+
+2026-10-15 基于 K32 新建 `codex/gdn-k32-next-path`，未修改生产内核。用户明确：不强制相对K32再降5%，理论七项总收益低于3%的方向放弃。当前优先细化32×32分块求解及完整A重组；N32条件保留，H的BF16 H/right直供L1作为独立备用，单独消除格式转换因理想上限2.798%排除。预算、离线数值筛查、资源/同步待评审项及下一轮验证边界见 [路径探索](optimization_exploration_k32_2026-10-15.md)。该文尚非完整实现详设，未通过阶段03整体评审，不能据此将候选记为采用。
