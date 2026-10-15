@@ -1,6 +1,6 @@
 # Prepare K32 开发期验证记录
 
-日期：2026-10-14。候选分支 `codex/gdn-prepare-k32`，从 `codex/gdn-profiling` / `809bce6887639e831caa856b8ac3a197a6a94294` 创建。方案见 [prepare_k32_design.md](prepare_k32_design.md)。当前完成候选设计、编码及离线检查；CANN 构建、逐 Stage 设备精度、ATK 正式验收与5%性能目标均未完成。本记录保留至设备验收完成，届时按阶段05收敛结果至对应 ATK README。
+初始日期：2026-10-14；实测分析更新：2026-10-15。候选分支 `codex/gdn-prepare-k32`，从 `codex/gdn-profiling` / `809bce6887639e831caa856b8ac3a197a6a94294` 创建。方案见 [prepare_k32_design.md](prepare_k32_design.md)。当前完成候选设计、编码、离线检查和用户提供的三轮普通性能分析；用户报告本轮精度测试全部通过。相对历史A0七kernel合计均值下降5.623%，新鲜A基线下的5%收益及完整ATK正式验收仍待完成。本记录保留至设备验收完成，届时按阶段05收敛结果至对应 ATK README。
 
 ## 性能追踪
 
@@ -8,7 +8,9 @@
 | --- | --- | --- | --- |
 | A0，历史基线 | 原 K64 求解，未采用 Stage6/H 实验 | 普通调用20组，七 kernel均值1708.3914us；Prepare715.08995us | 预算参考，需同环境新鲜 A |
 | msopprof_r0 | 原始实现 Prepare replay | 708.430969us；AIC Cube77.56251%、MTE1 23.2370% | 支持尝试计算/加载减量，不能替代普通性能基线 |
-| B，K32 候选 | 三处 FP32 MMAD 使用有效半区 K | 4项离线检查通过；受改动 FP32 MAC下降37.5%，L1→L0少48KiB/task | 尚未证明端到端收益 |
+| B1/B2/B3，K32 候选 | 三处 FP32 MMAD 使用有效半区 K | 用户报告精度通过；各20组普通调用，七项均值1613.28590/1612.17790/1611.52665us，合并1612.33015us；Prepare620.64430us | 相对历史A0下降5.623%，Prepare下降13.208%；建议保留候选并补新鲜A对照 |
+
+三轮CSV与各自metadata的140行名称/耗时完全匹配，四轮输入hash及case JSON hash相同。B数据对应优化提交 `dd707730627b29b1862fd335dfbc76e7f0e2666d`。收益归因、逐kernel/逐轮分布、5%余量和数据边界见 [timer_analysis_k32_b1_b3_2026-10-15.md](timer_analysis_k32_b1_b3_2026-10-15.md)。本批未带出构建/安装/频率日志及精度case报告，不据此宣布完整设备验收完成；case1等其它支持场景尚无本候选的新结果。
 
 普通性能固定统计 Cast、三次 Transpose、Prepare、H、O 七个 kernel 的 `op_summary.csv` / `Task Duration(us)`；以每次调用七行之和计算分布，再比较重复运行的均值、中位数和波动。不得把 timer scope sum、pipe占比或 msopprof replay 当性能验收值。首轮仅 case0；case1及其它支持场景在正式接受前回归。
 
