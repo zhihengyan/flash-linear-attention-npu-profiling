@@ -534,8 +534,8 @@ public:
     }
 
     // ========================= Stage 4 =========================
-    // Y = I + LeafLeft @ (-L). Prefill loads resident I once and MMADs I@I
-    // into each task's L0C slot before Wait Stage3 (hidden under Vector).
+    // Y_left = (I + LeafLeft @ (-L))[:,0:32]. Prefill loads I once and
+    // MMADs I@I[:,0:32] into each L0C slot before Wait Stage3 (under Vector).
     // Event bank=t&1; Wait M_FIX after each I@I so Acc Wait FIX_M(bank)
     // is that slot's Cube-idle credit, not ProcessAic's init FIX_M(1).
     // Acc uses P L0 banks (ping keeps I). Dump(t-1) overlaps Acc(t);
@@ -547,12 +547,12 @@ public:
             return;
         }
         WaitFlag<HardEvent::M_MTE1>(0);
-        LoadL1NzToL0AB<float>(l1I, l1I, l0Af[0], l0Bf[0], bt, bt, bt, true, false, 0);
+        LoadN32PrefillToL0AB(l1I, l0Af[0], l0Bf[0], 0);
         for (int64_t t = 0; t < nThis; ++t) {
             const uint8_t bank = static_cast<uint8_t>(t & 1);
             {
                 GDN_TIMER_SCOPE(timer_, PREPARE_SOLVE_PREFILL);
-                MmadL0ABToL0C<float>(l0Af[0], l0Bf[0], l0CTask[t], bt, bt, bt, true, bank);
+                MmadL0ABToL0C<float>(l0Af[0], l0Bf[0], l0CTask[t], bt, kVcs32, bt, true, bank);
             }
             SetFlag<HardEvent::M_FIX>(bank);
             WaitFlag<HardEvent::M_FIX>(bank);
@@ -568,8 +568,8 @@ public:
             WaitFlag<HardEvent::M_MTE1>(bank);
             // Left has nonzero logical columns only in K=[32,64).
             // Its transposed L1 leaf and -L both select physical source rows.
-            SolveHalfKMatmulToL0C<true, true>(l1LeafLeft[taskIdx], l1NegL[taskIdx], l0AfP[bank], l0BfP[bank],
-                                              l0CTask[taskIdx], false, bank);
+            N32SolveMatmulToL0C<true>(l1LeafLeft[taskIdx], l1NegL[taskIdx], l0AfP[bank], l0BfP[bank],
+                                      l0CTask[taskIdx], bank);
             SetFlag<HardEvent::M_FIX>(bank);
             SetFlag<HardEvent::M_MTE1>(bank);
     }
@@ -579,11 +579,11 @@ public:
         GDN_TIMER_SCOPE(timer_, PREPARE_SOLVE_DUMP);
             const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
             WaitFlag<HardEvent::M_FIX>(bank);
-            FixpipeL0cToGmNzCs(gmWsY[WsYOffset(taskIdx)], l0CTask[taskIdx], kChunk64);
+            FixpipeN32YToGmNzCs(gmWsY[WsYOffset(taskIdx)], l0CTask[taskIdx]);
             SetFlag<HardEvent::FIX_M>(bank);
             SetFlag<HardEvent::FIX_MTE2>(bank);
             WaitFlag<HardEvent::FIX_MTE2>(bank);
-            CopyGmNzToL1Fp32(l1Y[taskIdx], gmWsY[WsYOffset(taskIdx)], kChunk64);
+            CopyGmN32YToL1Fp32(l1Y[taskIdx], gmWsY[WsYOffset(taskIdx)]);
             NotifyAivStage4Done(taskIdx);
             SetFlag<HardEvent::MTE2_MTE1>(taskIdx);
     }
@@ -603,8 +603,8 @@ public:
             SolveHalfKMatmulToL0C<false, true>(l1I, l1LeafLeft[taskIdx], l0Af[bank], l0Bf[bank],
                                                l0CTask[taskIdx], true, bank);
             SetFlag<HardEvent::FIX_M>(bank);
-            SolveHalfKMatmulToL0C<false, false>(l1Y[taskIdx], l1LeafRight[taskIdx], l0AfP[bank], l0BfP[bank],
-                                                l0CTask[taskIdx], false, bank);
+            N32SolveMatmulToL0C<false>(l1Y[taskIdx], l1LeafRight[taskIdx], l0AfP[bank], l0BfP[bank],
+                                       l0CTask[taskIdx], bank);
             SetFlag<HardEvent::M_FIX>(bank);
             SetFlag<HardEvent::M_MTE1>(bank);
     }

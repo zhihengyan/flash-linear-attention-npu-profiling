@@ -1,5 +1,7 @@
 # GDN 原始流程与计时方案
 
+当前 N32 实验的计算差异见 [prepare_n32_design.md](prepare_n32_design.md)：Prepare 的 Stage4 仅生成/搬运 Y 左32列，Stage5 保留完整 A 初始化，再只更新左32列。原 scope 名称、次数、事件和 AIV/Stage6 调度保持 K32；下表 Prepare 源码行号对应当前实现。下文“仅增加诊断计时”描述原计时接入基线，不是当前 N32 分支的全部改动。
+
 基线：main 分支 `90176b44321ebdbf3ae2a9057243157d7085c6e1`。本次仅增加诊断计时；公式、task 划分、原有 event/flag、工作区和输出数值沿用基线。公开算子入口为 ChunkGatedDeltaRuleFwd；其内部覆盖 Arch22/Arch35 Phase6 和 A5 Prepare/H/O 两条路径。
 
 ## 改造前执行流程

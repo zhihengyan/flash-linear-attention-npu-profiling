@@ -165,6 +165,29 @@ __aicore__ inline void FixpipeL0cToGmNzCs(AscendC::GlobalTensor<float> gmTensor,
     AscendC::Fixpipe<float, float, CFG_NZ_L1>(gmTensor, l0CTensor, p);
 }
 
+// N32 Y_left: L0C NZ C0=16 [64,32] -> GM NZ C0=8 [64,32].
+// M stays 64, so source stride and destination Z stride are unchanged.
+// Only the first 8 KiB of each original 16 KiB workspace slot is written.
+__aicore__ inline void FixpipeN32YToGmNzCs(AscendC::GlobalTensor<float> gmTensor,
+                                           AscendC::LocalTensor<float> l0CTensor)
+{
+    AscendC::FixpipeParamsArch3510<AscendC::CO2Layout::NZ> p;
+    p.nSize = kVcs32;
+    p.mSize = kChunk64;
+    p.srcStride = kChunk64;
+    p.dstStride = kChunk64 * 8;
+    p.quantPre = QuantMode_t::NoQuant;
+    p.isChannelSplit = true;
+    p.unitFlag = 0;
+    AscendC::Fixpipe<float, float, CFG_NZ_L1>(gmTensor, l0CTensor, p);
+}
+
+__aicore__ inline void CopyGmN32YToL1Fp32(AscendC::LocalTensor<float> l1Tensor,
+                                         AscendC::GlobalTensor<float> gmTensor)
+{
+    AscendC::DataCopy(l1Tensor, gmTensor, AscendC::DataCopyParams(1, 256, 0, 0));
+}
+
 // GM row-major ND -> L1 cube NZ. AIC MTE2, Nd2NzParams (GM -> A1):
 // dstNzC0Stride / dstNzNStride are in C0_SIZE (32B).
 template <typename T>

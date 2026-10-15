@@ -1,12 +1,14 @@
-"""Offline FP32 NZ address/block-solve checks; not a CANN instruction emulator.
+"""Historical K32 FP32 NZ checks; not a CANN instruction emulator.
 
-Read the candidate's literal load descriptors and template call sites, then
+Read the frozen K32 commit's literal load descriptors and call sites, then
 compare independently decoded operands against dense matrix slices. CANN
 compilation, hardware rounding and synchronization still need device tests.
 Requires NumPy; run this file directly from any directory.
+The active N32 implementation is checked by test_prepare_n32.py.
 """
 
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from pathlib import Path
 import re
 import subprocess
@@ -21,6 +23,15 @@ ARCH = OP.parent / "chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35"
 MATMUL = ARCH / "chunk_gated_delta_rule_fwd_prepare_matmul.h"
 KERNEL = ARCH / "chunk_gated_delta_rule_fwd_prepare.h"
 BASELINE = "809bce6887639e831caa856b8ac3a197a6a94294"
+K32_COMMIT = "d0cb628df7c8c23c0342392dfaf4ec910aba9947"
+
+
+@lru_cache(maxsize=None)
+def k32_source(path):
+    return subprocess.check_output(
+        ["git", "show", f"{K32_COMMIT}:{path.relative_to(ROOT).as_posix()}"],
+        cwd=ROOT, encoding="utf-8",
+    )
 
 
 def body(source, name):
@@ -52,7 +63,7 @@ def source_load(transpose, second_half):
     # Deliberately limited to the two literal descriptor branches, not a C++
     # interpreter. Fail if the source no longer has this form; don't silently
     # test a Python copy of stale production parameters.
-    source = body(MATMUL.read_text(encoding="utf-8"), "FillSolveHalfKLoad")
+    source = body(k32_source(MATMUL), "FillSolveHalfKLoad")
     branches = re.fullmatch(
         r"\s*if constexpr \(TransposeInputs\) \{(.*?)\} else \{(.*?)\}\s*",
         source, re.S,
@@ -74,7 +85,7 @@ def source_load(transpose, second_half):
 
 
 def call_modes(stage):
-    source = body(KERNEL.read_text(encoding="utf-8"), stage)
+    source = body(k32_source(KERNEL), stage)
     return [(a == "true", b == "true") for a, b in re.findall(
         r"SolveHalfKMatmulToL0C<(true|false), (true|false)>", source
     )]
@@ -186,8 +197,8 @@ class PrepareK32(unittest.TestCase):
                         np.testing.assert_array_equal(candidate_a[valid:, valid:], eye[valid:, valid:])
 
     def test_fixed_mmad_and_unchanged_baseline_regions(self):
-        source = MATMUL.read_text(encoding="utf-8")
-        common = (ARCH / "chunk_gated_delta_rule_fwd_prepare_common.h").read_text(encoding="utf-8")
+        source = k32_source(MATMUL)
+        common = k32_source(ARCH / "chunk_gated_delta_rule_fwd_prepare_common.h")
         for name, value in (("kChunk64", 64), ("kVcs32", 32)):
             self.assertRegex(common, rf"constexpr uint32_t {name} = {value};")
         helper = tokens(body(source, "SolveHalfKMatmulToL0C"))
@@ -208,8 +219,8 @@ class PrepareK32(unittest.TestCase):
         for name in ("FillLoad2D", "LoadL1NzToL0AB", "MmadL0ABToL0C", "MatmulToL0C", "WuMatmulToL0C"):
             self.assertEqual(tokens(body(source, name)), tokens(body(previous_matmul, name)))
         previous = baseline(KERNEL)
-        current = KERNEL.read_text(encoding="utf-8")
-        inventory_doc = (OP / "docs/timer_flow.md").read_text(encoding="utf-8")
+        current = k32_source(KERNEL)
+        inventory_doc = k32_source(OP / "docs/timer_flow.md")
         relative = KERNEL.relative_to(ROOT).as_posix()
         for match in re.finditer(r"GDN_TIMER_SCOPE\(timer_,\s*(\w+)\)", current):
             line = current.count("\n", 0, match.start()) + 1

@@ -7,7 +7,8 @@
  *   transposeB=false: B NZ is [n, k] (kkt: same k' tile as A, n=m).
  *   transposeB=true:  B NZ is [k, n] (I / -L / Y). Leaf tiles from 8-col
  *   ND->NZ are NZ(inv.T): pass transposeA / !transposeB for those Loads.
- * fp32 L1 slots are 64x64, so A/B srcStride is kNumMFracs64.
+ * fp32 L1 tiles retain 64 rows (including Y_left 64x32), so source stride
+ * is kNumMFracs64. N32's transposed B uses a narrower destination stride.
  */
 
 #ifndef CHUNK_GATED_DELTA_RULE_FWD_PREPARE_MATMUL_H
@@ -129,6 +130,66 @@ __aicore__ inline void SolveHalfKMatmulToL0C(AscendC::LocalTensor<float> l1A,
     SetFlag<AscendC::HardEvent::MTE1_M>(evt);
     WaitFlag<AscendC::HardEvent::MTE1_M>(evt);
     MmadL0ABToL0C<float>(l0A, l0B, l0C, kChunk64, kChunk64, kVcs32, initC, evt);
+}
+
+// Rectangular prefill: I64 @ I64[:,0:32]. A remains full 64; B's transposed
+// load packs a 32x64 NZ image for L0B Zn (dstStride=2, source stride=4).
+__aicore__ inline void FillN32PrefillLoads(AscendC::LoadData2DParamsV2 &loadA,
+                                          AscendC::LoadData2DParamsV2 &loadB)
+{
+    FillLoad2D(loadA, 4, 8, 4, 4, false);
+    FillLoad2D(loadB, 4, 4, 4, 2, true);
+}
+
+__aicore__ inline void LoadN32PrefillToL0AB(AscendC::LocalTensor<float> l1I,
+                                            AscendC::LocalTensor<float> l0A,
+                                            AscendC::LocalTensor<float> l0B, uint8_t evt)
+{
+    AscendC::LoadData2DParamsV2 loadA;
+    AscendC::LoadData2DParamsV2 loadB;
+    FillN32PrefillLoads(loadA, loadB);
+    AscendC::LoadData(l0A, l1I, loadA);
+    AscendC::LoadData(l0B, l1I, loadB);
+    SetFlag<AscendC::HardEvent::MTE1_M>(evt);
+    WaitFlag<AscendC::HardEvent::MTE1_M>(evt);
+}
+
+// Acc: Left[:,32:64] @ N[32:64,0:32].
+// Update: Y_left @ R00, with Right TL storing R00.T.
+// Both keep M=64,K=32,N=32. A fills 8 KiB and B fills 4 KiB of their
+// original 16 KiB banks. Full 64 sources and Y_left retain srcStride=4.
+template <bool TransposeInputs>
+__aicore__ inline void FillN32SolveLoads(AscendC::LoadData2DParamsV2 &loadA,
+                                        AscendC::LoadData2DParamsV2 &loadB)
+{
+    if constexpr (TransposeInputs) {
+        FillLoad2D(loadA, 2, 8, 4, 4, true);
+        loadA.mStartPosition = 2;
+        FillLoad2D(loadB, 2, 4, 4, 2, true);
+        loadB.mStartPosition = 2;
+    } else {
+        FillLoad2D(loadA, 4, 4, 4, 4, false);
+        FillLoad2D(loadB, 2, 4, 4, 2, false);
+    }
+}
+
+template <bool TransposeInputs>
+__aicore__ inline void N32SolveMatmulToL0C(AscendC::LocalTensor<float> l1A,
+                                           AscendC::LocalTensor<float> l1B,
+                                           AscendC::LocalTensor<float> l0A,
+                                           AscendC::LocalTensor<float> l0B,
+                                           AscendC::LocalTensor<float> l0C, uint8_t evt)
+{
+    AscendC::LoadData2DParamsV2 loadA;
+    AscendC::LoadData2DParamsV2 loadB;
+    FillN32SolveLoads<TransposeInputs>(loadA, loadB);
+    AscendC::LoadData(l0A, l1A, loadA);
+    AscendC::LoadData(l0B, l1B, loadB);
+    SetFlag<AscendC::HardEvent::MTE1_M>(evt);
+    WaitFlag<AscendC::HardEvent::MTE1_M>(evt);
+    // M stays 64: the first 32 columns share the full A's L0C NZ prefix.
+    // Preserve the right half produced by Stage5's full initialization.
+    MmadL0ABToL0C<float>(l0A, l0B, l0C, kChunk64, kVcs32, kVcs32, false, evt);
 }
 
 // C = A[m,k] @ B[k,n]. One MMAD. A is 64x64 (kStep=4). B is 64x128
