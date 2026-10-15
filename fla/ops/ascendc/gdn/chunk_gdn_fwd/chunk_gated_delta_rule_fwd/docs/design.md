@@ -1,5 +1,7 @@
 # GDN 计时接入设计
 
+当前实验增量为[Prepare Block32整链设计](prepare_block32_design.md)。分支`codex/gdn-prepare-block32`从K32基线`f27e968b`编码，普通与Profile Prepare均直接走两次32³ MMAD及完整A重组；无需实验开关。用户明确授权暂跳逐Stage设备门禁并确认K32精度全过，新候选尚未设备验收。下文计时设计和K32探索保留为历史依据。
+
 当前规则版本：V2。本设计仅描述诊断增量；基线为 main `90176b44321ebdbf3ae2a9057243157d7085c6e1`。按仓库阶段 03→04→05 路由读取现有实现、ChunkFwdH 设计、原 ATK generator/executor/reference。采用 CHUNK_DEPENDENT V1 开发参考（来源 commit a14961e9dfe8c8264768d67fb447101873da4ecf）的现有 H 状态依赖链，不改算子调度。host/kernel/调用层接入技术写法参考本地 timer_by_skill 的已存在诊断实现；本轮新增完整关键运算与循环观测、布局 v2 和独立源码审核，未沿用旧审核结论。
 
 计算链保持：KKT=KKᵀ 的 gate/下三角系数 → solve → W/U；H 内 WH、vNew=U−WH、KV、状态更新；O 内 QK、QH、causal mask/gate、Attn×vNew、输出融合。原 fixed/varlen、head ratio、BT64/128、V128/256、initial/final state、B30 和 H/O idle/pipeline 分支均保持。原图、关键步骤与源码配对清单由 [timer_flow.md](timer_flow.md) 定义。

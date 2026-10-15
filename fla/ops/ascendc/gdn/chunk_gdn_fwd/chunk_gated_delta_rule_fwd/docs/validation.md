@@ -1,4 +1,51 @@
-# Prepare K32 开发期验证记录
+# Prepare K32 / Block32 开发期验证记录
+
+## 当前轮：Block32已接入普通调用链（2026-10-15）
+
+起点：用户回退未接入修改后，重新核对当前分支`codex/gdn-prepare-block32`、HEAD `f27e968b`、工作树干净。用户确认K32精度已全部通过，明确授权暂跳阶段04逐Stage设备验收门禁，在当前分支实现主候选整链。本轮无需等待私有Stage4 probe，也没有独立实验开关。以下K32记录保留为历史证据；本段定义当前待测版本。
+
+实现详见[Block32整链设计](prepare_block32_design.md)。普通/诊断Prepare kernel均从同一`op.Process()`进入新Stage4/5：两次FP32 32³ MMAD，X仅4KiB NZ GM中转，C10→owner UB，单VF将两leaf及C10拼成完整BF16 A，再经公开GM A或private padded A供原WU。全部owner task拼A后再S6，保护db1 leaf；S6 ready在MTE2等待，保护A GM回读。workspace仍每AIC64KiB，host/ABI、ATK输入和容差不变。
+
+按公开host实参核对：A5两个模型case满足UsePreparePath，调用l0op::ChunkGatedDeltaRuleFwdPrepare；timerOptional只控制打点，普通/Profile共用改动后的arch35实现。正常性能脚本与参数保持；重新构建安装当前分支即可测试Block32。公开中间输出需要A；H实际消费W/U，已修正探索文档中“H直接读GM A”的旧描述。
+
+开发参考仍为CHUNK_INDEPENDENT V1（a78efa9512dfa64c20b2a58a75e84e88a054d694）的生命周期/事件方法；实现以自身K32为工程基线，没有复制其它算子的slot数。保留原owner-AIV映射与片上上传路径，不声明已迁移V2 R01等全量规则。
+
+本机Python3.12.14/NumPy2.3.5离线结果：`test_*.py`共34项通过（当前Block32 5项、历史K32 4项、timer合同14项、timer摘要11项）。Block32覆盖当前C++字面描述符、非对称operand及错误转置/stride负例、4KiB L0/NZ中转、768组有效长度1..64×4seed×3幅度的A及BF16 W/U模型、Scatter唯一覆盖、字节级原位BF16压缩、workspace边界/别名、生产接线与UB复用顺序。K32旧检查明确固定历史f27e968b，不冒充对新kernel的验证；新检查直接读取当前生产源码。timer枚举/布局未变，PREPARE_SOLVE_PREFILL本路径不再执行，计时清单同步到当前行号和AIV拼A语义。
+
+这些不是Ascend指令或调度仿真。本机无CANN/NPU，未构建wheel或执行设备精度、MSS、确定性和性能；不把K32通过状态继承给Block32。实际首次/回绕/尾pack flag序列、硬件舍入、同步和性能均待设备确认。没有新的性能数值。
+
+### 当前轮设备命令
+
+在内部Linux的当前分支保存/同步上述源码后，沿用原构建方式：
+
+```bash
+git branch --show-current
+git status --short
+FLA_NPU_SOC=ascend950 FLA_NPU_OPS= python scripts/build_wheel.py
+```
+
+将构建末尾打印的本轮wheel准确路径赋给WHEEL_PATH（不要复用旧K32 wheel），再运行：
+
+```bash
+python -m pip install --force-reinstall --no-cache-dir --no-deps "$WHEEL_PATH"
+python scripts/verify_libcust_opapi_md5.py --python
+python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --device 0
+```
+
+最后一条原命令默认case0、case1，普通性能及诊断重放都会进入Block32。为隔离case0并与已有K32三轮同口径比较，可沿用已有`--cases 0 --output-dir <新目录>`，至少三轮、保存普通op_summary和run_metadata；七项逐调用Task Duration(us)之和计算均值/波动，同时报告相对K32增量和原A累计收益。3%是理论方向筛选线，无新的相对K32≥5%要求。脚本的warmup5只控制诊断重放，不改变普通ATK采样配置。
+
+本候选精度沿用原ATK入口，先确认Prepare的outputA=true/false、tail及GVA，然后前向与性能；跳过的是逐Stage编码门禁，原测试标准保持。Prepare最初小批可复用：
+
+```bash
+for first in 24 36 216 228 1224 1236 1416 1428; do
+  ATK_GM_INIT_MODE=off CASE_START="$first" CASE_END="$((first + 12))" bash tests/atk/run_test_cpu.sh -op=chunk_gated_delta_rule_fwd_prepare -npu_device_id=0 -scope=accuracy -soc=ascend950
+done
+bash tests/atk/chunk_gated_delta_rule_fwd/scripts/run_matrix.sh 0
+```
+
+完整Prepare2416、G1/3/4、V256、varlen/partial pack、MSS/确定性及Example/ST按原README回归；无需改generator/golden/容差。出现精度失败或kernel超时，按原定位路由分析本候选，不把已完成整链接入与设备通过混淆。
+
+## 历史：K32设计、验证及性能
 
 初始日期：2026-10-14；实测分析更新：2026-10-15。候选分支 `codex/gdn-prepare-k32`，从 `codex/gdn-profiling` / `809bce6887639e831caa856b8ac3a197a6a94294` 创建。方案见 [prepare_k32_design.md](prepare_k32_design.md)。当前完成候选设计、编码、离线检查、三轮B及三轮同日A的普通性能分析；用户报告本轮精度测试全部通过。case0七kernel合计均值相对同日A下降5.424%，达到≥5%均值目标；完整支持范围的ATK正式验收仍待完成。本记录保留至设备验收完成，届时按阶段05收敛结果至对应 ATK README。
 

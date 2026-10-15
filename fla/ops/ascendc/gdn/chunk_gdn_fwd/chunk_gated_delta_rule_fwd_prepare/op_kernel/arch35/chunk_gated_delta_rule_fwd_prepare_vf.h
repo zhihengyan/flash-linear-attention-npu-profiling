@@ -845,6 +845,66 @@ __aicore__ inline void MulReduceScatterVF32(LocalTensor<float> &dst, LocalTensor
     }
 }
 
+// The old VCS index buffer is 512 B; VCS uses its first 8 u32 only.
+// Keep lanes 0..63 in its unused upper 256 B for Block32 scatter addresses.
+__aicore__ inline void FillBlock32IndicesVF(LocalTensor<uint32_t> &indices)
+{
+    __ubuf__ int32_t *dst = (__ubuf__ int32_t *)indices.GetPhyAddr();
+    __VEC_SCOPE__
+    {
+        RegTensor<int32_t> lane;
+        MaskReg all = CreateMask<int32_t, MaskPattern::ALL>();
+        Arange(lane, static_cast<int32_t>(0));
+        StoreAlign(dst + 64, lane, all);
+    }
+}
+
+// Leaves are packed [R00.T | R11.T] FP32 [32,64]; C10 is ND [32,32].
+// Reuse the released full-L tile for A, then compress forward to BF16.
+__aicore__ inline void AssembleBlock32AVF(LocalTensor<float> &aFull,
+                                          LocalTensor<float> &packedLeaves,
+                                          LocalTensor<float> &c10,
+                                          LocalTensor<uint32_t> &indices)
+{
+    __ubuf__ float *aAddr = (__ubuf__ float *)aFull.GetPhyAddr();
+    __ubuf__ bfloat16_t *aB16 = (__ubuf__ bfloat16_t *)aFull.GetPhyAddr();
+    __ubuf__ float *leafAddr = (__ubuf__ float *)packedLeaves.GetPhyAddr();
+    __ubuf__ float *cAddr = (__ubuf__ float *)c10.GetPhyAddr();
+    __ubuf__ uint32_t *idxAddr = (__ubuf__ uint32_t *)indices.GetPhyAddr();
+    __VEC_SCOPE__
+    {
+        MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        MaskReg allIdx = CreateMask<uint32_t, MaskPattern::ALL>();
+        RegTensor<uint32_t> lane, half, diagBase, pairBase, index;
+        RegTensor<float> leaf, cross, zeros, row;
+        LoadAlign(lane, idxAddr + 64);
+        Duplicate(half, static_cast<uint32_t>(32), allIdx);
+        And(half, lane, half, allIdx);
+        Muls(diagBase, lane, static_cast<uint32_t>(64), allIdx);
+        Add(diagBase, diagBase, half, allIdx);
+        Add(pairBase, lane, half, allIdx);
+        for (uint16_t col = 0; col < 32; ++col) {
+            LoadAlign(leaf, leafAddr + col * 64);
+            Adds(index, diagBase, static_cast<uint32_t>(col), allIdx);
+            Scatter(aAddr, leaf, index, all);
+        }
+        Duplicate(zeros, 0.0f, all);
+        for (uint16_t pair = 0; pair < 16; ++pair) {
+            // Two complete C10 rows; every loaded lane is initialized.
+            LoadAlign(cross, cAddr + pair * 64);
+            Adds(index, pairBase, static_cast<uint32_t>(2048 + 128 * pair), allIdx);
+            Scatter(aAddr, cross, index, all);
+            Adds(index, pairBase, static_cast<uint32_t>(32 + 128 * pair), allIdx);
+            Scatter(aAddr, zeros, index, all);
+        }
+        LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
+        for (uint16_t r = 0; r < 64; ++r) {
+            LoadAlign(row, aAddr + r * 64);
+            StoreCastB16<bfloat16_t>(aB16 + r * 64, row, all);
+        }
+    }
+}
+
 } // namespace ChunkGatedDeltaRuleFwdPrepare
 
 #endif

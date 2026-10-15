@@ -7,7 +7,7 @@
  * Memory map: design/chunk_gated_delta_rule_fwd_prepare_ascendc-design.md.
  *
  * Pack: TG = 3 if G=3 else 4. AIV0 tasks 0,2; AIV1 1,3. kkt once per HK (OwnsHk).
- * L1: Y [0,64); k' aliases NegL [64,128). Pack N+1 Stage1 waits pack N Stage4
+ * L1: X in old Y [0,64); k' aliases NegL [64,128). N+1 Stage1 waits N Stage4
  * before the k' L1 write so Stage5/6/7 of N can overlap next Stage1.
  * Do not gate Stage1 on Stage7: that kills the overlap and regresses G=1.
  */
@@ -45,8 +45,11 @@ public:
         if (userWs != nullptr) {
             gmWsY.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(userWs + wsBase),
                                   kWsYSlots * kWsYElems);
+            gmWsA.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(userWs + wsBase),
+                                  kWsYTotalBytes / sizeof(InDtype));
         } else {
             gmWsY.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(uOut));
+            gmWsA.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(uOut));
         }
         gmQ.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(q));
         gmK.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(k));
@@ -111,7 +114,7 @@ public:
         // S3 reuses [10, 82).
         //
         //   [0.00,  0.50)  unused      512 B         hole before ubVcsIdx
-        //   [0.50,  1.00)  ubVcsIdx      512 B  u32    VCS scatter idx {0,32}
+        //   [0.50,  1.00)  ubVcsIdx      512 B  u32    VCS idx + Block32 lanes
         //   [1.00,  9.00)  ubIVcs        8 KiB  fp32   I_vcs = [I32 | I32]
         //   [9.00,  9.25)  ubGPrime[0]  256 B  fp32   g' ping, [64]
         //   [9.25,  9.50)  ubBetaEff[0] 256 B  fp32   beta_eff ping, [64]
@@ -139,19 +142,19 @@ public:
         // S3 (after S1 q/k released). Ping/pong for the two tasks on one AIV:
         //   ping db=0: [10, 18) LPacked  [18, 34) ResVcs  [34, 50) LFull
         //   pong db=1: [50, 58) LPacked  [58, 74) ResVcs  [74, 90) LFull
-        // S6 (after S3; overlaps S1/S3, g'/β at [9,10) stay):
+        // S6 (after all A assembly/writes; g'/β at [9,10) stay):
         //   [32, 48) ubS6K[0] 16 KiB k' ping   [48, 64) ubS6K[1] k' pong
         //   V=128: [64, 80) / [80, 96) 16 KiB. V=256: [64, 96) / [96, 128) 32 KiB.
         //   vb/kbg ND → L1 NZ C0=16 via DataCopy (64,1,srcGap,0)
         // GVA (G=2/3/4) reuses ubKkt ping/pong and the owner's L1 k' slot;
         // no extra UB/L1 buffers. With the supported V=128, peak UB usage
         // ends at 236 KiB; L1 uses
-        // 496 KiB of 512 KiB.
+        // 480 KiB of 512 KiB after deleting Cube I.
         // =====================================================================
 
-        // UB[0.50, 1.00) KiB = 512 B, uint32. Only the first 8 values are used.
+        // UB[0.50, 1.00) KiB = 512 B, uint32. VCS uses the first 8 values.
         // VCS scatter index for packing two 32x32 leaves into I_vcs 32x64:
-        // values are {0, 32} (left leaf at col 0, right leaf at col 32).
+        // Values {0,32} select leaves; upper 256 B hold Block32 lanes0..63.
         ubVcsIdx = buf.template GetBuffer<BufferType::ASCEND_UB, uint32_t>(kUbVcsIdx);
 
         // UB[1.00, 9.00) KiB = 8 KiB, fp32 ND [32, 64].
@@ -162,7 +165,7 @@ public:
         // UB[9.00, 25.00) KiB unused (old Cube NZ I). Overlaps g'/beta.
 
         // UB[25.00, 41.00) KiB = 16 KiB, fp32.
-        // Stage0 ND I then zeros for leaf L1. Released before S1.
+        // Stage0 zeros for leaf L1. Released before S1.
         ubS0Zero = buf.template GetBuffer<BufferType::ASCEND_UB, float>(kUbS0Zero);
 
         // UB[9.00, 10.00) resident g'/beta, then S1 q/k and S2 kkt ping/pong.
@@ -214,18 +217,17 @@ public:
             l1Kbg[t].SetSize(static_cast<uint32_t>(kChunk64 * K));
             l1Vb1[t] = buf.template GetBuffer<BufferType::ASCEND_CB, InDtype>(L1ResidentVb(t) + kBytesK128);
             l1Vb1[t].SetSize(static_cast<uint32_t>(kChunk64 * kGdnHeadDimK));
-            // Y at [0,64). k' aliases NegL at [64,128); Stage3 overwrites
+            // X in old Y [0,64). k' aliases NegL [64,128); Stage3 overwrites
             // k' after Stage2.
             l1Y[t] = buf.template GetBuffer<BufferType::ASCEND_CB, float>(L1Y(t));
         }
 
-        // L1[480, 496) KiB = 16 KiB, fp32 cube-NZ I_64, C0=8.
-        l1I = buf.template GetBuffer<BufferType::ASCEND_CB, float>(kL1ResidentI);
+        // L1[480, 496) KiB was Cube I_64; Block32 needs no prefill.
 
         // L0A/L0B 64 KiB, L0C 256 KiB. bf16 and fp32 views alias the same banks.
         // [0]=even [0,16)/[32,48)/L0C[0,64); [1]=odd [16,32)/[48,64)/L0C[64,128).
-        // Stage2 kkt uses pair 0/1. Stage4 Acc and Stage5 second MMAD share
-        // Stage7's P slots; Stage4/5 drain before Stage7. SetSize(16 KiB) so
+        // Stage2/5 use pair 0/1. Stage4 shares Stage7's P slots;
+        // Stage4/5 drain before Stage7. SetSize(16 KiB) so
         // ping does not keep the remaining 32 KiB and overlap pong.
         for (uint32_t b = 0; b < 2; ++b) {
             l0A[b] = buf.template GetBuffer<BufferType::ASCEND_L0A, InDtype>(kL0PairOff[b]);
@@ -243,8 +245,8 @@ public:
         }
 
         // L0C 256 KiB: four 64 KiB-aligned slots, one 16 KiB C tile each.
-        // Stage2 kkt still uses slots 0/1 (even/odd). Stage4 I@I writes all
-        // nThis slots before Wait Stage3; LeafLeft@NegL accumulates in place.
+        // Stage2 uses slots 0/1. X and C10 each initialize a standalone32
+        // tile at the task base; only the first 4 KiB is valid.
         for (uint32_t t = 0; t < static_cast<uint32_t>(kTasksPerRound); ++t) {
             l0CTask[t] = buf.template GetBuffer<BufferType::ASCEND_L0C, float>(t * kL0CTaskStride);
             l0CTask[t].SetSize(kL0CTaskStride / sizeof(float));
@@ -253,16 +255,16 @@ public:
 
     // ========================= Stage 0 =========================
     // Once per AIV: I_vcs + scatter idx, zero L1
-    // leaf slots for this AIV's tasks, AIV0 paints Cube I_64 ND→NZ C0=8.
+    // leaf slots for this AIV's tasks. No Cube I_64 is needed.
     __aicore__ inline void Stage0_GenerateResidentAux()
     {
         if (auxReady != 0) {
             return;
         }
         FillVcsIdentity(ubIVcs, ubVcsIdx);
-        // Leaf zeros first so both AIVs copy in parallel. ubS0Zero is then
-        // free for AIV0 to paint I. AIV1 can leave for Stage1 while AIV0
-        // uploads I. L1 leaf slots are disjoint by taskIdx (AIV0: 0,2;
+        FillBlock32IndicesVF(ubVcsIdx);
+        // Leaf zeros on both AIVs in parallel. L1 leaf slots are disjoint
+        // by taskIdx (AIV0: 0,2;
         // AIV1: 1,3). Scatter only rewrites the 32x32 quadrant; TR/BL stay
         // zero if primed once.
         Duplicate(ubS0Zero, 0.0f, static_cast<int32_t>(kChunk64 * kChunk64));
@@ -274,15 +276,6 @@ public:
         }
         SetFlag<HardEvent::MTE3_V>(kHeUb0);
         WaitFlag<HardEvent::MTE3_V>(kHeUb0);
-        // Cube I_64 is shared L1: only AIV0 paints ND I and 8-col uploads.
-        if (subBlock == 0) {
-            Identity64VF(ubS0Zero);
-            SetFlag<HardEvent::V_MTE3>(kHeUb0);
-            WaitFlag<HardEvent::V_MTE3>(kHeUb0);
-            UbNd64ToL1Nz8(l1I, ubS0Zero);
-            SetFlag<HardEvent::MTE3_V>(kHeUb0);
-            WaitFlag<HardEvent::MTE3_V>(kHeUb0);
-        }
         auxReady = 1;
     }
 
@@ -534,42 +527,14 @@ public:
     }
 
     // ========================= Stage 4 =========================
-    // Y = I + LeafLeft @ (-L). Prefill loads resident I once and MMADs I@I
-    // into each task's L0C slot before Wait Stage3 (hidden under Vector).
-    // Event bank=t&1; Wait M_FIX after each I@I so Acc Wait FIX_M(bank)
-    // is that slot's Cube-idle credit, not ProcessAic's init FIX_M(1).
-    // Acc uses P L0 banks (ping keeps I). Dump(t-1) overlaps Acc(t);
-    // each task Fixpipes into its own gmWsY slot.
-    __aicore__ inline void Stage4_PrefillI(int64_t nThis)
-    {
-        const int32_t bt = static_cast<int32_t>(chunkSize);
-        if (nThis <= 0) {
-            return;
-        }
-        WaitFlag<HardEvent::M_MTE1>(0);
-        LoadL1NzToL0AB<float>(l1I, l1I, l0Af[0], l0Bf[0], bt, bt, bt, true, false, 0);
-        for (int64_t t = 0; t < nThis; ++t) {
-            const uint8_t bank = static_cast<uint8_t>(t & 1);
-            {
-                GDN_TIMER_SCOPE(timer_, PREPARE_SOLVE_PREFILL);
-                MmadL0ABToL0C<float>(l0Af[0], l0Bf[0], l0CTask[t], bt, bt, bt, true, bank);
-            }
-            SetFlag<HardEvent::M_FIX>(bank);
-            WaitFlag<HardEvent::M_FIX>(bank);
-            SetFlag<HardEvent::FIX_M>(bank);
-        }
-        SetFlag<HardEvent::M_MTE1>(0);
-    }
-
+    // X = R11 @ (-L10), FP32 32x32. Acc(t) overlaps Dump(t-1).
     __aicore__ inline void Stage4_AccIssue(int64_t taskIdx)
     {
         GDN_TIMER_SCOPE(timer_, PREPARE_SOLVE_ISSUE);
             const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
             WaitFlag<HardEvent::M_MTE1>(bank);
-            // Left has nonzero logical columns only in K=[32,64).
-            // Its transposed L1 leaf and -L both select physical source rows.
-            SolveHalfKMatmulToL0C<true, true>(l1LeafLeft[taskIdx], l1NegL[taskIdx], l0AfP[bank], l0BfP[bank],
-                                              l0CTask[taskIdx], false, bank);
+            Stage4Block32MatmulToL0C(l1LeafLeft[taskIdx], l1NegL[taskIdx], l0AfP[bank], l0BfP[bank],
+                                     l0CTask[taskIdx], bank);
             SetFlag<HardEvent::M_FIX>(bank);
             SetFlag<HardEvent::M_MTE1>(bank);
     }
@@ -579,78 +544,72 @@ public:
         GDN_TIMER_SCOPE(timer_, PREPARE_SOLVE_DUMP);
             const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
             WaitFlag<HardEvent::M_FIX>(bank);
-            FixpipeL0cToGmNzCs(gmWsY[WsYOffset(taskIdx)], l0CTask[taskIdx], kChunk64);
+            FixpipeBlock32ToGmNzCs(gmWsY[WsYOffset(taskIdx)], l0CTask[taskIdx]);
             SetFlag<HardEvent::FIX_M>(bank);
             SetFlag<HardEvent::FIX_MTE2>(bank);
             WaitFlag<HardEvent::FIX_MTE2>(bank);
-            CopyGmNzToL1Fp32(l1Y[taskIdx], gmWsY[WsYOffset(taskIdx)], kChunk64);
+            CopyGmBlock32NzToL1Fp32(l1Y[taskIdx], gmWsY[WsYOffset(taskIdx)]);
             NotifyAivStage4Done(taskIdx);
             SetFlag<HardEvent::MTE2_MTE1>(taskIdx);
     }
 
     // ========================= Stage 5 =========================
-    // A = LeafLeft + Y @ LeafRight. tmp = I @ LeafLeft (init) then
-    // Y @ LeafRight accumulate. Intra-task second Load uses L0 [32,48)/[48,64)
-    // so MTE1 overlaps the first Cube M. Dump stays per-task after both MMADs.
-    // Left has only K=[32,64) rows; Right has only K=[0,32) rows.
-    // Full chunk + outputA: L0C→gmA (valid M rows) then Nd2Nz back to L1.
-    // Tail or outputA=0: L0C→L1 NZ directly (padding rows stay in L0C).
+    // C10 = X @ R00, FP32 32x32. AIV restores both diagonal leaves.
     __aicore__ inline void Stage5_Compute(int64_t taskIdx)
     {
         GDN_TIMER_SCOPE(timer_, SOLVE);
             const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
             WaitFlag<HardEvent::M_MTE1>(bank);
-            SolveHalfKMatmulToL0C<false, true>(l1I, l1LeafLeft[taskIdx], l0Af[bank], l0Bf[bank],
-                                               l0CTask[taskIdx], true, bank);
-            SetFlag<HardEvent::FIX_M>(bank);
-            SolveHalfKMatmulToL0C<false, false>(l1Y[taskIdx], l1LeafRight[taskIdx], l0AfP[bank], l0BfP[bank],
-                                                l0CTask[taskIdx], false, bank);
+            Stage5Block32MatmulToL0C(l1Y[taskIdx], l1LeafRight[taskIdx], l0Af[bank], l0Bf[bank],
+                                     l0CTask[taskIdx], bank);
             SetFlag<HardEvent::M_FIX>(bank);
             SetFlag<HardEvent::M_MTE1>(bank);
     }
 
-    __aicore__ inline void DumpAL0cToL1(int64_t taskIdx, uint32_t n)
-    {
-        FixpipeParamsArch3510<CO2Layout::NZ> aFixpipeParams;
-        aFixpipeParams.nSize = n;
-        aFixpipeParams.mSize = n;
-        aFixpipeParams.srcStride = n;
-        aFixpipeParams.dstStride = n * 16;
-        aFixpipeParams.quantPre = QuantMode_t::F322BF16;
-        aFixpipeParams.unitFlag = 0;
-        aFixpipeParams.isChannelSplit = false;
-        Fixpipe<InDtype, float, CFG_NZ_L1>(l1A[taskIdx], l0CTask[taskIdx], aFixpipeParams);
-    }
-
-    __aicore__ inline void Stage5_Dump(const ChunkRange &chunk, int64_t hv, int64_t taskIdx)
+    __aicore__ inline void Stage5_Dump(int64_t taskIdx)
     {
         GDN_TIMER_SCOPE(timer_, PREPARE_SOLVE_DUMP);
             const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
-            const uint32_t n = static_cast<uint32_t>(chunkSize);
-            const uint32_t m = static_cast<uint32_t>(chunk.M);
-            const int64_t offA = OffsetBHTD(chunk.batch, hv, chunk.tokenStart, HV, T, chunkSize);
             WaitFlag<HardEvent::M_FIX>(bank);
-            if (outputA != 0) {
-                FixpipeL0cToGmNd<InDtype>(gmA[offA], l0CTask[taskIdx], m, n, n);
-                SetFlag<HardEvent::FIX_MTE2>(bank);
-                WaitFlag<HardEvent::FIX_MTE2>(bank);
-                if (m == n) {
-                    CopyGmNdToL1Nz<InDtype>(l1A[taskIdx], gmA[offA], n, n);
-                    SetFlag<HardEvent::MTE2_MTE1>(taskIdx);
-                } else {
-                    DumpAL0cToL1(taskIdx, n);
-                    SetFlag<HardEvent::FIX_MTE1>(taskIdx);
-                }
-            } else {
-                DumpAL0cToL1(taskIdx, n);
-                SetFlag<HardEvent::FIX_MTE1>(taskIdx);
-            }
+            FixpipeL0cToUbFp32Nd(ubLPacked[PingPongSlot(taskIdx)], l0CTask[taskIdx], kVcs32, bank);
             SetFlag<HardEvent::FIX_M>(bank);
+            NotifyAivStage5Done(taskIdx);
+    }
+
+    __aicore__ inline void Stage5_AssembleAivOne(const ChunkRange &chunk, int64_t hv, int64_t taskIdx)
+    {
+        GDN_TIMER_SCOPE(timer_, PREPARE_SOLVE_DUMP);
+        WaitAicStage5Done(taskIdx);
+        const int32_t db = PingPongSlot(taskIdx);
+        AssembleBlock32AVF(ubLFull[db], ubResVcs[db], ubLPacked[db], ubVcsIdx);
+        SetFlag<HardEvent::V_MTE3>(kHeUb0);
+        WaitFlag<HardEvent::V_MTE3>(kHeUb0);
+        LocalTensor<InDtype> aB16 = ubLFull[db].template ReinterpretCast<InDtype>();
+        aB16.SetSize(kChunk64 * kChunk64);
+        if (outputA != 0) {
+            const int64_t offA = OffsetBHTD(chunk.batch, hv, chunk.tokenStart, HV, T, chunkSize);
+            CopyUbToGmElems(gmA[offA], aB16, static_cast<uint32_t>(chunk.M * chunkSize));
+        }
+        if (outputA == 0 || chunk.M < chunkSize) {
+            CopyUbToGmElems(gmWsA[WsAPaddedOffset(taskIdx)], aB16, kChunk64 * kChunk64);
+        }
+    }
+
+    __aicore__ inline void LoadAssembledAToL1(const ChunkRange &chunk, int64_t hv, int64_t taskIdx)
+    {
+        if (outputA != 0 && chunk.M == chunkSize) {
+            const int64_t offA = OffsetBHTD(chunk.batch, hv, chunk.tokenStart, HV, T, chunkSize);
+            CopyGmNdToL1Nz<InDtype>(l1A[taskIdx], gmA[offA], kChunk64, kChunk64);
+        } else {
+            CopyGmNdToL1Nz<InDtype>(l1A[taskIdx], gmWsA[WsAPaddedOffset(taskIdx)], kChunk64, kChunk64);
+        }
+        SetFlag<HardEvent::MTE2_MTE1>(taskIdx);
+        WaitFlag<HardEvent::MTE2_MTE1>(taskIdx);
     }
 
     // ========================= Stage 6 =========================
-    // vb = v * β, kbg = k' * β * exp2(g'). ND→L1 NZ C0=16. V3 runs this
-    // after Stage3 (no Stage5 wait) so it overlaps Cube Stage4/5.
+    // vb = v * β, kbg = k' * β * exp2(g'). ND→L1 NZ C0=16. Runs
+    // after all owner tasks' A assembly and GM writes, before Stage7.
     // Tail zero-fills UB then copies M rows.
     __aicore__ inline void Stage6_AivOne(const ChunkRange &chunk, int64_t hv, int64_t taskIdx)
     {
@@ -840,6 +799,14 @@ public:
             for (int64_t t = subBlock; t < cur.nThis; t += 2) {
                 Stage3_AivOne(PackWorkId(cur.base, cur.nThis, t) % HV, t);
             }
+            // Consume both db leaves before Stage6's V/K buffers can
+            // overwrite the other task's leaf/A region.
+            for (int64_t t = subBlock; t < cur.nThis; t += 2) {
+                ChunkRange chunk;
+                int64_t hv;
+                DecodeTask(cur.base, cur.nThis, t, chunk, hv);
+                Stage5_AssembleAivOne(chunk, hv, t);
+            }
             if (pack != coreIdx) {
                 DrainPackWuToGm(prev.base, prev.nThis);
             }
@@ -893,7 +860,6 @@ public:
                     NotifyKktSiblings(cur.base, cur.nThis, t);
                 }
             }
-            Stage4_PrefillI(cur.nThis);
             if (cur.nThis > 0) {
                 {
                     GDN_TIMER_SCOPE(timer_, FRONT_WAIT);
@@ -914,10 +880,7 @@ public:
                 for (int64_t t = 0; t < cur.nThis; ++t) {
                     WaitFlag<HardEvent::MTE2_MTE1>(t);
                     Stage5_Compute(t);
-                    ChunkRange chunk;
-                    int64_t hv;
-                    DecodeTask(cur.base, cur.nThis, t, chunk, hv);
-                    Stage5_Dump(chunk, hv, t);
+                    Stage5_Dump(t);
                 }
             }
             for (int64_t t = 0; t < cur.nThis; ++t) {
@@ -928,11 +891,7 @@ public:
                 ChunkRange chunk;
                 int64_t hv;
                 DecodeTask(cur.base, cur.nThis, t, chunk, hv);
-                if (outputA != 0 && chunk.M == chunkSize) {
-                    WaitFlag<HardEvent::MTE2_MTE1>(t);
-                } else {
-                    WaitFlag<HardEvent::FIX_MTE1>(t);
-                }
+                LoadAssembledAToL1(chunk, hv, t);
                 Stage7_AicOne(chunk, hv, t);
             }
             const int64_t nextPack = pack + numCore;
@@ -980,6 +939,7 @@ private:
     GlobalTensor<float> gmBetaEff;
     // Workspace
     GlobalTensor<float> gmWsY;
+    GlobalTensor<InDtype> gmWsA;
 
     // Local
     // UB
@@ -1001,7 +961,6 @@ private:
     LocalTensor<InDtype> ubS7W[2], ubS7U[2];
 
     // L1
-    LocalTensor<float> l1I;
     LocalTensor<InDtype> l1KHat[4], l1A[4], l1Kbg[4], l1Vb[4], l1Vb1[4];
     LocalTensor<float> l1NegL[4], l1LeafRight[4], l1LeafLeft[4], l1Y[4];
 

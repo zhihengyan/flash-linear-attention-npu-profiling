@@ -131,6 +131,60 @@ __aicore__ inline void SolveHalfKMatmulToL0C(AscendC::LocalTensor<float> l1A,
     MmadL0ABToL0C<float>(l0A, l0B, l0C, kChunk64, kChunk64, kVcs32, initC, evt);
 }
 
+// X = R11 @ (-L10). Both inputs retain full64 FP32 NZ images.
+// Left stores R11.T in BR; NegL stores -L10 in BL. Each Load fills only
+// the first 4 KiB of its 16 KiB bank. The result is a standalone32 tile.
+__aicore__ inline void FillStage4Block32Loads(AscendC::LoadData2DParamsV2 &loadA,
+                                             AscendC::LoadData2DParamsV2 &loadB)
+{
+    FillLoad2D(loadA, 2, 4, 4, 2, true);
+    loadA.mStartPosition = 2;
+    loadA.kStartPosition = 4;
+    FillLoad2D(loadB, 2, 4, 4, 2, true);
+    loadB.mStartPosition = 2;
+}
+
+__aicore__ inline void Stage4Block32MatmulToL0C(AscendC::LocalTensor<float> l1LeafLeft,
+                                               AscendC::LocalTensor<float> l1NegL,
+                                               AscendC::LocalTensor<float> l0A,
+                                               AscendC::LocalTensor<float> l0B,
+                                               AscendC::LocalTensor<float> l0C, uint8_t evt)
+{
+    AscendC::LoadData2DParamsV2 loadA;
+    AscendC::LoadData2DParamsV2 loadB;
+    FillStage4Block32Loads(loadA, loadB);
+    AscendC::LoadData(l0A, l1LeafLeft, loadA);
+    AscendC::LoadData(l0B, l1NegL, loadB);
+    SetFlag<AscendC::HardEvent::MTE1_M>(evt);
+    WaitFlag<AscendC::HardEvent::MTE1_M>(evt);
+    MmadL0ABToL0C<float>(l0A, l0B, l0C, kVcs32, kVcs32, kVcs32, true, evt);
+}
+
+// C10 = X @ R00. X is tight32 NZ; Right stores R00.T in full64 TL.
+// An untransposed L0B load is interpreted as Zn by the MMAD.
+__aicore__ inline void FillStage5Block32Loads(AscendC::LoadData2DParamsV2 &loadA,
+                                             AscendC::LoadData2DParamsV2 &loadB)
+{
+    FillLoad2D(loadA, 2, 4, 2, 2, false);
+    FillLoad2D(loadB, 2, 4, 4, 2, false);
+}
+
+__aicore__ inline void Stage5Block32MatmulToL0C(AscendC::LocalTensor<float> l1X,
+                                               AscendC::LocalTensor<float> l1LeafRight,
+                                               AscendC::LocalTensor<float> l0A,
+                                               AscendC::LocalTensor<float> l0B,
+                                               AscendC::LocalTensor<float> l0C, uint8_t evt)
+{
+    AscendC::LoadData2DParamsV2 loadA;
+    AscendC::LoadData2DParamsV2 loadB;
+    FillStage5Block32Loads(loadA, loadB);
+    AscendC::LoadData(l0A, l1X, loadA);
+    AscendC::LoadData(l0B, l1LeafRight, loadB);
+    SetFlag<AscendC::HardEvent::MTE1_M>(evt);
+    WaitFlag<AscendC::HardEvent::MTE1_M>(evt);
+    MmadL0ABToL0C<float>(l0A, l0B, l0C, kVcs32, kVcs32, kVcs32, true, evt);
+}
+
 // C = A[m,k] @ B[k,n]. One MMAD. A is 64x64 (kStep=4). B is 64x128
 // (isTranspose, kStep=8, dstStride=8). MMAD k stays kDim.
 template <typename InDtype>

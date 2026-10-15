@@ -122,6 +122,27 @@ __aicore__ inline void FixpipeL0cToUbFp32Nd(AscendC::LocalTensor<float> ubTensor
     AscendC::Fixpipe<float, float, CFG_ROW_MAJOR_UB>(ubTensor, l0CTensor, p);
 }
 
+// Tight32 FP32 NZ C0=8, 4 KiB. ChannelSplit is confined to GM.
+__aicore__ inline void FixpipeBlock32ToGmNzCs(AscendC::GlobalTensor<float> gmTensor,
+                                              AscendC::LocalTensor<float> l0CTensor)
+{
+    AscendC::FixpipeParamsArch3510<AscendC::CO2Layout::NZ> p;
+    p.nSize = kVcs32;
+    p.mSize = kVcs32;
+    p.srcStride = kVcs32;
+    p.dstStride = kVcs32 * 8;
+    p.quantPre = QuantMode_t::NoQuant;
+    p.isChannelSplit = true;
+    p.unitFlag = 0;
+    AscendC::Fixpipe<float, float, CFG_NZ_L1>(gmTensor, l0CTensor, p);
+}
+
+__aicore__ inline void CopyGmBlock32NzToL1Fp32(AscendC::LocalTensor<float> l1Tensor,
+                                              AscendC::GlobalTensor<float> gmTensor)
+{
+    AscendC::DataCopy(l1Tensor, gmTensor, AscendC::DataCopyParams(1, 128, 0, 0));
+}
+
 // Arch3510 L0C fp32 NZ -> GM ND (bf16 via F322BF16). Official scenario 2
 // plus quantPre; ndNum=1. srcStride is aligned M (C0_Size units), never N.
 template <typename OutDtype>

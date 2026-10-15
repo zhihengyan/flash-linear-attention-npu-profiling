@@ -1,5 +1,7 @@
 # K32 之后的 GDN 优化路径探索
 
+后续实现：用户明确选择主候选，并授权暂时跳过逐Stage设备验证门禁。在当前`codex/gdn-prepare-block32`分支、干净K32基线`f27e968b`上完成整链接入，见[Block32详设](prepare_block32_design.md)和[验证记录](validation.md)。下文“未修改生产kernel”等为探索阶段状态，不代表当前工作树；实际性能尚待设备测量。
+
 日期：2026-10-15；方案规则 V2，当前处于阶段 03。本文是候选筛选和进入详设前的工程分析，不是已通过整体评审的实现方案。公开接口、CPU golden、输入生成、容差和支持范围保持当前约定。
 
 本轮结论：**优先细化 Prepare 的 32×32 分块求解与完整 A 重组**。它从 K32 已有的归约裁剪继续消除结构零计算，有比局部搬运时序更大的静态预算。用户已明确：不强制相对K32再降5%，理论七项总耗时收益低于3%的方向直接放弃。按此门槛，单独消除格式转换排除；N32仅条件保留，分块求解继续详设；H的BF16 H/right中转为独立备用。没有修改生产kernel，没有将任何新候选记为采用。
@@ -65,7 +67,7 @@ A   = [[R00,   0],
 
 当前 K32 仍执行 `I@I` 预填、`Left@N`、`I@Left`、`Y@Right`。上述形式只保留最终 A 左下块真正需要的两次乘法，并直接复用已求得的对角块。唯一主要变量为 **Prepare Stage4/5 的求解及结果重组数据流**；主候选不同时改变 Stage1/2/6/7 算法、CG/pack 映射、H/O 或输入精度。
 
-这不是把 W/U 改成不产生 A 的递推：公开前向 H 确实消费 Prepare 的 GM A，必须保留完整 BF16 A 输出。tail 仍按原补齐方式生成整个片上 A，并只向 GM 写有效行；`output_a=false` 仍向 W/U 提供完整 L1 A。
+这不是把 W/U 改成不产生 A 的递推：公开前向默认disable_recompute=True会导出GM A，因此必须保留完整BF16 A输出；H实际消费W/U，不直接读取A（整链接线时按host实参修正原描述）。tail仍按原补齐方式生成完整A，并只向公开GM A写有效行；`output_a=false`仍向W/U提供完整L1 A。
 
 ### 3.2 计算与搬运预算
 
@@ -138,7 +140,7 @@ FP32 leaf 算法、两次矩阵乘的有效乘积顺序和最后 BF16 cast 目�
 | --- | --- | --- |
 | 保守 N32 | Stage5 只需 Y 左 32 列。将 Stage4 I@I / Left@N 的 N 改为32；Stage5 保持完整 I@Left 初始化，仅向 A 左半区累加 Y_left@R00。MAC 655360→393216（-40%），Y 有效中转减半 | 条件保留。按前次边际为62.847us（3.898%），若删除的预填已隐藏则31.423us（1.949%），尚未扣代价，区间跨3%。若预填已隐藏且中转没有额外暴露收益则放弃；否则须先证明净节省可达48.370us。当前不优先安排设备实验 |
 | Stage3 条带上传 | 每 task 8次 -L、8次 leaf UB→L1；K32 未减少这些调用 | 旧 timer 标量窗不能给出可节省时长；缺合法批量格式和scratch证明，暂不编码 |
-| Stage5 保留 GM A、额外直供 L1 | full/outputA 路径原先 GM 写 A 后回读；tail/a0 已有 L0C→L1 BF16 | 需付额外 Fixpipe，单纯少8KiB读不证明够48.370us；尚无达到3%的净收益预算，不安排编码；不能删除 H 要用的 GM A |
+| Stage5 保留 GM A、额外直供 L1 | full/outputA 路径原先 GM 写 A 后回读；tail/a0 已有 L0C→L1 BF16 | 需付额外 Fixpipe，单纯少8KiB读不证明够48.370us；尚无达到3%的净收益预算，不安排编码；不能删除公开中间输出约定的GM A |
 | H BF16 H/right 直接供 L1 | `LoadStage0H` 从 GM 读 BF16 H；`LoadRight` 从 vUpdateWorkspace 读 BF16 right。AIV 已生产这两份数据 | **独立第二优先路径**。保留 O 所需 GM H；只消除 H 内部回读/私有中转。不是消除已常驻的 FP32 state。须证明 UB→L1 的物理转置/NZ、H/right 共享槽 free、tail 和 H0/末 chunk。不能与 Prepare 主候选合测 |
 | O 重用 Q/K、V lookahead | 当前 `Process` 已按 GVA group 的 firstHvInGroup 加载一次 Q/K，Stage4 已有 V 提前一 head 搬运 | 不作为新增优化；MTE2大不等于重复读同一 Q/K。若继续定位，应查 H/V 的布局、cache、pipe等待 |
 | 单独消除Cast/Transpose | 四项均值合计45.11712us；Prepare/H/O保持原耗时 | 理想上限2.798%，低于3%，直接放弃该独立方向 |

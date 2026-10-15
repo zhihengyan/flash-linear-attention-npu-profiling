@@ -145,7 +145,7 @@ struct ChunkGatedDeltaRuleFwdStageTilingData {
     // Fixed-length: Ceil(T / BT) * B * Hv. Varlen: (chunk_indices.numel()/2) * Hv.
     int64_t totalChunkTileCount;
 
-    // 1: A is written to GM. 0: A remains resident in L1 only.
+    // 1: public A is written to GM. 0: only private padded A feeds W/U.
     int64_t hasAOutput;
 };
 
@@ -160,13 +160,12 @@ constexpr uint16_t kAiv1IntraFlagOff = 16;
 // Separate from Stage1/2/3 ids 0..3 so AIC's Stage4 Wait cannot steal the
 // Stage2→Stage3 notify.
 constexpr uint16_t kFlagS3DoneBase = 4;
-// Pack N Stage4 dumped Y / freed NegL → pack N+1 Stage1 may write k'.
+// Pack N Stage4 dumped X / freed NegL → pack N+1 Stage1 may write k'.
 // Ids 8..11 (AIV1 24..27). Same ids V3 used as kFlagS4DumpBase.
 constexpr uint16_t kFlagS4DumpBase = 8;
 // Stage6→Stage7 reuses Stage3 ids 4..7 (AIC sees AIV1 as 20,21,22,23).
-// Those are consumed after Stage4. Ids 0..3 still carry the Stage2 kkt
-// notify on PIPE_FIX; a PIPE_MTE1 Wait(0) can steal that leftover and
-// Stage7 runs before L1 vb/kbg exist. Ids 12..15 are ignored by intra-block.
+// Those are consumed by Stage4 before Stage6 can notify. Ids 0..3 carry
+// KKT then C10 in the reverse direction. Ids 12..15 are ignored by intra-block.
 constexpr uint16_t kFlagS6DoneBase = 4;
 // Pack N Stage7 finished. The existing tail gate protects L1 slot reuse;
 // the final pack also uses this flag to let AIV flush the last W/U UB slots.
@@ -246,7 +245,7 @@ __aicore__ inline void WaitAivStage3Done(int64_t taskIdx)
     AscendC::CrossCoreWaitFlag<0x4, PIPE_MTE1>(CubeWaitFlagForTask(taskIdx + kFlagS3DoneBase));
 }
 
-// Stage4 Y on L1 / NegL free. Pack N+1 Stage1 waits this before k' L1 write.
+// Stage4 X issued to L1 / NegL free. S5 separately waits MTE2_MTE1.
 __aicore__ inline void NotifyAivStage4Done(int64_t taskIdx)
 {
     AscendC::CrossCoreSetFlag<0x4, PIPE_FIX>(CubeWaitFlagForTask(taskIdx + kFlagS4DumpBase));
@@ -255,6 +254,18 @@ __aicore__ inline void NotifyAivStage4Done(int64_t taskIdx)
 __aicore__ inline void WaitAicStage4Done(int64_t taskIdx)
 {
     AscendC::CrossCoreWaitFlag<0x4>(static_cast<uint16_t>(taskIdx + kFlagS4DumpBase));
+}
+
+// Stage5 C10 in owner UB. Reuse the KKT direction/ids only after consuming
+// Stage3 ready, which proves the old KKT wait and VCS both completed.
+__aicore__ inline void NotifyAivStage5Done(int64_t taskIdx)
+{
+    AscendC::CrossCoreSetFlag<0x4, PIPE_FIX>(CubeWaitFlagForTask(taskIdx));
+}
+
+__aicore__ inline void WaitAicStage5Done(int64_t taskIdx)
+{
+    AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(static_cast<uint16_t>(taskIdx));
 }
 
 // Stage6 L1 vb/kbg ready → Stage7. Reuse Stage3 ids 4..7 (consumed
@@ -267,7 +278,8 @@ __aicore__ inline void NotifyAicStage6Done(int64_t taskIdx)
 
 __aicore__ inline void WaitAivStage6Done(int64_t taskIdx)
 {
-    AscendC::CrossCoreWaitFlag<0x4, PIPE_MTE1>(CubeWaitFlagForTask(taskIdx + kFlagS6DoneBase));
+    // A GM writes precede the notification; A's next consumer is MTE2.
+    AscendC::CrossCoreWaitFlag<0x4, PIPE_MTE2>(CubeWaitFlagForTask(taskIdx + kFlagS6DoneBase));
 }
 
 __aicore__ inline void NotifyAivStage7Done()
@@ -383,6 +395,8 @@ constexpr uint32_t kVecFp32 = 64 * static_cast<uint32_t>(sizeof(float));
 // UB resident. [0, 0.5) KiB is an unused hole so later offsets stay put.
 constexpr uint32_t kUbVcsIdx = 512;
 constexpr uint32_t kUbIVcs = 1 * kPrepareKb;
+static_assert(kUbIVcs - kUbVcsIdx >= 128 * sizeof(uint32_t),
+              "VCS indices and Block32 lanes must fit before the identity");
 constexpr uint32_t kUbGPrime0 = 9 * kPrepareKb;
 constexpr uint32_t kUbBetaEff0 = 9 * kPrepareKb + kVecFp32;
 constexpr uint32_t kUbGPrime1 = 9 * kPrepareKb + 2 * kVecFp32;
@@ -448,22 +462,32 @@ constexpr uint32_t kBytesK128 = 64 * 128 * 2;
 constexpr uint32_t kBytesVb256 = 64 * 256 * 2;
 constexpr uint32_t kBytesFp32Nz64 = 64 * 64 * 4;
 constexpr uint32_t kWsYBytes = 16 * kPrepareKb;
-// Four Y slots so Acc/Dump pipeline Dump(t) Fixpipe does not overwrite
-// Dump(t-1) MTE2 still reading gmWsY. 64x64 fp32 NZ is 16 KiB.
+// Keep four original 16 KiB slots; X occupies each first 4 KiB, padded A
+// the final 8 KiB. Per-task slots prevent in-flight reads being overwritten.
 constexpr uint32_t kWsYSlots = 4;
 constexpr uint32_t kWsYElems = kWsYBytes / sizeof(float);
 constexpr uint32_t kWsYTotalBytes = kWsYSlots * kWsYBytes;
-// User workspace is Y only. Tail A goes L0C→L1 (same Fixpipe as outputA=0).
+// Host allocation stays 64 KiB/core; both typed views share this region.
 constexpr uint32_t kWsPerCoreBytes = kWsYTotalBytes;
+static_assert(kVcs32 * kVcs32 * sizeof(float) <= kBytesA64,
+              "X must end before padded A begins");
+static_assert(2 * kBytesA64 <= kWsYBytes, "padded A must fit its task slot");
 
 __aicore__ inline int64_t WsYOffset(int64_t taskIdx)
 {
     return taskIdx * static_cast<int64_t>(kWsYElems);
 }
 
-// Y owns [0, 64). k' aliases NegL at [64, 128): 64x128 bf16 == 64x64 fp32 NZ.
+// Each 16 KiB slot holds X [0,4) KiB and padded BF16 A [8,16) KiB.
+// Offset is in BF16 elements, unlike WsYOffset's FP32 elements.
+__aicore__ inline int64_t WsAPaddedOffset(int64_t taskIdx)
+{
+    return taskIdx * static_cast<int64_t>(kWsYBytes / sizeof(bfloat16_t)) + kChunk64 * kChunk64;
+}
+
+// X reserves old Y [0,64). k' aliases NegL [64,128): 64x128 bf16 == 64x64 fp32.
 // Intra-pack: Stage2 consumes k', Stage3 overwrites the same slots with -L.
-// Cross-pack: pack N Stage5 reads Y while pack N+1 Stage1 writes k' (NegL
+// Cross-pack: pack N Stage5 reads X while pack N+1 Stage1 writes k' (NegL
 // already consumed in Stage4). Gate is Wait Stage4, not Stage5.
 constexpr uint32_t kL1Y0 = 0;
 constexpr uint32_t kL1NegL0 = 64 * kPrepareKb;
@@ -474,20 +498,20 @@ constexpr uint32_t kL1ResidentA0 = 256 * kPrepareKb;
 constexpr uint32_t kL1ResidentKbg0 = 288 * kPrepareKb;
 constexpr uint32_t kL1ResidentVb0 = 352 * kPrepareKb;
 constexpr uint32_t kL1ResidentI = 480 * kPrepareKb;
-// [496, 512) unused; layout kept so later L1 map stays put.
+// [480,512) unused after deleting Cube I; later offsets are kept.
 
 // L0 (same physical banks, typed views)
 constexpr uint32_t kL0Bf16Pair = 16 * kPrepareKb;
 constexpr uint32_t kL0Fp32Pair = 16 * kPrepareKb;
-// L0A/L0B 16 KiB slots. Stage4/5 second MMAD (fp32) and Stage7 (bf16)
+// L0A/L0B 16 KiB slots. Stage4 MMAD (fp32) and Stage7 (bf16)
 // share even [32, 48) / odd [48, 64). Stage4/5 drain before Stage7.
 // SetSize 16 KiB so a view at 32 does not cover the slot at 48.
 constexpr uint32_t kL0S7Slot = 16 * kPrepareKb;
 constexpr uint32_t kL0S7Ping = 32 * kPrepareKb;
 constexpr uint32_t kL0S7Pong = 48 * kPrepareKb;
 constexpr uint32_t kL0C1 = 64 * kPrepareKb;
-// Stage4/5: one 64x64 fp32 C tile per pack task. 64 KiB stride so the four
-// views sit on L0C [0,256) without sharing a 64 KiB bank. Tile itself is 16 KiB.
+// Stage4/5: standalone32 FP32 C per task, 4 KiB. Keep 64 KiB stride so the
+// four views sit on L0C [0,256) without sharing a bank. Stage2 still uses64.
 constexpr uint32_t kL0CTaskStride = 64 * kPrepareKb;
 constexpr uint32_t kL0CTaskElems = kChunk64 * kChunk64;
 constexpr uint32_t kL0PairOff[2] = {0, kL0Bf16Pair};
