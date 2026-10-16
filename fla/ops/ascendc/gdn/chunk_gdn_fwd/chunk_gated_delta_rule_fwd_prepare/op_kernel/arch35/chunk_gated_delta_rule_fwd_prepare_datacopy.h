@@ -83,6 +83,23 @@ __aicore__ inline void UbNd64ToL1Nz8(AscendC::LocalTensor<float> l1,
     }
 }
 
+// Already packed 64x64 NZ8 -> L1, one contiguous 16 KiB upload.
+__aicore__ inline void UploadStage3NegLNzToL1(LocalTensor<float> l1, LocalTensor<float> packedNz)
+{
+    DataCopy(l1, packedNz, DataCopyParams(1, 512, 0, 0));
+}
+
+// Two compact 32x32 NZ8 leaves -> the original 64x64 L1 TL/BR quadrants.
+// Four 1 KiB bursts per leaf, skipping the other 32 rows in each L1 C0.
+// Unwritten quadrants retain Stage0 zero. All offsets below are floats.
+__aicore__ inline void UploadStage3LeafNzToL1(LocalTensor<float> l1LeafRight,
+                                              LocalTensor<float> l1LeafLeft,
+                                              LocalTensor<float> packedNz)
+{
+    DataCopy(l1LeafRight, packedNz, DataCopyParams(4, 32, 0, 32));
+    DataCopy(l1LeafLeft[2304], packedNz[1024], DataCopyParams(4, 32, 0, 32));
+}
+
 // Packed 32x64 ND (two leaves side by side) -> one 32x32 in a 64x64 NZ
 // quadrant. packed row is 64 so srcStride=7. rowQuad/colQuad in {0,1}.
 __aicore__ inline void UbPackedLeafToL1(AscendC::LocalTensor<float> l1,

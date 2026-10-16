@@ -17,6 +17,55 @@ using namespace AscendC::MicroAPI;
 
 constexpr int32_t VL = 64;
 
+// One 8x8 ND patch per vector: lane j reads row j/8, column j%8.
+// Arange supports int32, not uint32; these nonnegative b32 indices are
+// stored once and subsequently loaded as uint32 by Gather.
+__aicore__ inline void FillS3Nz8GatherIndexVF(LocalTensor<uint32_t> indices)
+{
+    __ubuf__ int32_t *dst = (__ubuf__ int32_t *)indices.GetPhyAddr();
+    __VEC_SCOPE__
+    {
+        MaskReg all = CreateMask<int32_t, MaskPattern::ALL>();
+        RegTensor<int32_t> lane, row, offset;
+        Arange(lane, 0);
+        ShiftRights(row, lane, int16_t(3), all);
+        Muls(row, row, int32_t(56), all);
+        Add(offset, row, lane, all);
+        StoreAlign(dst, offset, all);
+    }
+}
+
+// Bitwise ND -> compact NZ8. Stage3 sources always have a 64-float row:
+// <64,1> packs -L, <32,2> packs the side-by-side physical leaf results.
+template <uint32_t Rows, uint32_t Groups>
+__aicore__ inline void PackStage3Nz8VF(LocalTensor<float> src, LocalTensor<float> dst,
+                                        LocalTensor<uint32_t> indices)
+{
+    static_assert((Rows == 64 && Groups == 1) || (Rows == 32 && Groups == 2));
+    constexpr uint32_t cols = 64 / Groups;
+    __ubuf__ float *srcAddr = (__ubuf__ float *)src.GetPhyAddr();
+    __ubuf__ float *dstAddr = (__ubuf__ float *)dst.GetPhyAddr();
+    __ubuf__ uint32_t *idxAddr = (__ubuf__ uint32_t *)indices.GetPhyAddr();
+    __VEC_SCOPE__
+    {
+        LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
+        MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        RegTensor<uint32_t> index;
+        RegTensor<float> value;
+        LoadAlign(index, idxAddr);
+        for (uint16_t group = 0; group < Groups; ++group) {
+            for (uint16_t fc = 0; fc < cols / 8; ++fc) {
+                for (uint16_t rb = 0; rb < Rows / 8; ++rb) {
+                    const uint32_t srcOff = rb * 8 * 64 + group * cols + fc * 8;
+                    const uint32_t dstOff = group * Rows * cols + fc * Rows * 8 + rb * 64;
+                    Gather(value, srcAddr + srcOff, index, all);
+                    StoreAlign(dstAddr + dstOff, value, all);
+                }
+            }
+        }
+    }
+}
+
 constexpr CastTrait kCastB162B32 = {
     RegLayout::ZERO,
     SatMode::UNKNOWN,

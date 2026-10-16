@@ -1,4 +1,73 @@
-# Prepare K32 开发期验证记录
+# 当前实验：Stage3 NZ8 打包与批量上传（2026-10-16）
+
+分支 `codex/gdn-stage3-nz-upload`，直接从 K32 `d0cb628df7c8c23c0342392dfaf4ec910aba9947` 创建。上一轮 N32 分析文档已先保存在 N32 分支提交 `2ccedfc5`，本分支没有继承 N32/Block32 kernel。方案见 [prepare_stage3_nz_upload_design.md](prepare_stage3_nz_upload_design.md)。以下为当前待设备验证的实验；后文 K32 记录是历史基线，不代表本实验精度或性能通过。
+
+## 本轮性能追踪与实现边界
+
+| 版本 | 主变量与证据 | 状态/判断 |
+| --- | --- | --- |
+| 10/16 K32 A | 用户结果 atk_output_1016/k32：普通 case0 20组，七项1610.88620us，Prepare620.28335us | 最近同口径参考；设备实验仍需同环境新鲜 A 对照 |
+| 10/16 N32 | 七项1605.40415us，仅比K32低0.3403%；精度尚未执行 | 不作为本轮基线，不继承其修改 |
+| Stage3 NZ8 B | 每task −L/leaf 上传16→3次；仍24KiB；新增96组Gather/StoreAlign、48KiB UB读写、2次Vector store→load本地屏障及1对V_MTE3事件 | 已整链接入，50项离线检查通过；无CANN编译/设备精度/性能结果，不能宣称已加速 |
+
+本轮目标是验证 Stage3 上传调用开销是否足以抵消 Vector 打包成本。约2.7%的参考收益对应七项节省43.49393us（若全来自Prepare，需降低7.01195%）；用户已明确3%不是强制指标，2.7%也不是新的硬门槛。是否采用以同环境独立重复普通性能净收益和精度决定，不按上传调用减少81.25%直接推断。
+
+采用阶段03 V2、无依赖开发参考 CHUNK_INDEPENDENT V1（来源 `a78efa9512dfa64c20b2a58a75e84e88a054d694`）；工程参考为当前K32自身。保留既有 AIV task 映射和 UB→L1 边界，不将本轮视为 R01/R06 全量迁移。按照用户已有授权跳过逐Stage设备验证的编码门槛，直接完成普通和Profile整链；正式精度、MSS、确定性及设备性能验收仍待执行。
+
+仅四个 Prepare arch35 头文件有 kernel 修改：Stage0 新增常驻 Gather 索引，UB[90,138)复用已释放S1区域作为两槽scratch，Stage3打包并上传。K32 MMAD helper、VCS、门控数学、Stage4–7、ProcessAic/Aiv、跨核ready/free、GM workspace、host/ABI、H/O、CPU golden、输入范围和容差均保持。两个上传源scratch互不重叠，分别保留−L上传与VCS重叠；原S1末MTE3_V和S3末MTE3_MTE2保护复用。实际代码由独立Prepare入口消费，前向普通/Profile均调用同一Prepare实现，没有实验开关或未接入helper。
+
+采集脚本只移植已验证的归档wheel校验功能及15项离线测试（来自 `1ffc1e6a`）。默认无新参数，仍校验安装产物与当前build；可选 `--reference-wheel` 严格核对安装文件与指定wheel，兼容根目录及 `.data/purelib`、`.data/platlib`，并记录wheel SHA256。该功能不改ATK输入、普通预热/采样或timer布局。
+
+## 本轮离线检查
+
+Windows环境没有CANN/NPU/AscendC编译器。Python3.12.14 / NumPy2.3.5，入口：
+
+```bash
+python -m unittest discover -s fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut -p 'test_*.py' -v
+```
+
+当前新增 `test_prepare_stage3_nz.py` 6项：从真实C++读取索引生成、Gather地址表达式和DataCopy描述符，用独立ND→NZ8编码核对两个随机种子×valid1..64的128组位模式、leaf TL/BR象限和未写零区，包含±0/NaN payload/Inf、越界守卫和错误单位/象限/stride负例；核对scratch与两槽LFull/VCS/KKT不重叠、原调度和同步发布顺序、正常/Profile入口、未受影响数学helper及timer清单。K32原4项转为明确冻结历史提交，当前代码由新增检查验证。另保留timer/摘要25项、wheel校验15项。2026-10-16上述50项全部通过（7.783s）；`git diff --check`通过。首轮检查发现生命周期测试引用了错误的旧Stage1方法名，已按实际`Stage1_OneTask`修正并复测全量通过，未因此改动生产调度。
+
+这些是地址/源码检查，不是AscendC指令仿真；不同G/V和连续pack的调度依据是生产调度与K32逐方法对照保持，不是已执行的设备case。编译/API支持、硬件地址检查、动态同步和真实吞吐必须由下述设备验证确认。
+
+## 可复用的设备执行方法
+
+沿用原CANN/Python/ATK环境，在Linux仓库根目录切到本分支，确认包含本次修改后构建。使用构建末尾打印的准确路径设置 `WHEEL_PATH`：
+
+```bash
+git switch codex/gdn-stage3-nz-upload
+git status --short
+FLA_NPU_SOC=ascend950 FLA_NPU_OPS= python scripts/build_wheel.py
+python -m pip install --force-reinstall --no-cache-dir --no-deps "$WHEEL_PATH"
+python scripts/verify_libcust_opapi_md5.py --python
+```
+
+先执行 Prepare 精度筛查/完整回归及前向原精度入口，case、golden和阈值不变。首轮可复用后文K32的96条Prepare筛查；正式采用前仍需 Prepare 2416条、前向500条双标杆分片、MSS、确定性与Example/ST等原要求，覆盖G1/2/3/4、V128/256、varlen、tail/partial pack及A输出路径。公开前向分片入口：
+
+```bash
+bash tests/atk/chunk_gated_delta_rule_fwd/scripts/run_matrix.sh 0
+```
+
+性能仍用此前完全相同的命令（默认case0/1）；空载卡若为device1，精度和性能命令统一改为1，并在A/B两侧使用同一张卡：
+
+```bash
+python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --device 0
+```
+
+首轮聚焦case0时可加 `--cases 0`，建议A/B/A交错且各至少3个独立进程。若同一checkout轮流装归档K32/B wheel，必须使用本分支采集器并指定**当前实际安装的那一份**wheel：
+
+```bash
+python -m pip install --force-reinstall --no-cache-dir --no-deps "$WHEEL_PATH"
+python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --device 0 --cases 0 --reference-wheel "$WHEEL_PATH"
+```
+
+这个可选模式对照wheel而非遗留build staging，仍检查`.so`、`.o`、Python及配置文件，不能跳过不匹配错误。A/B使用同版本采集脚本；metadata的source_commit是采集checkout，不代表归档wheel的kernel源码，需连同各wheel自身源码提交/构建日志归档。
+
+每轮带回 `run_metadata.json` 和**普通** `op_summary.csv`，以及精度结果；如需分析Stage3辅助窗口，带回 `timer/case_0/gdn_npu_time_parsed.csv` / `capture_metadata.json`（或按timer_analysis.md生成的摘要）。主指标仍为每次Cast、Transpose(g)、Transpose(beta)、Prepare、H、O、Transpose(gCumsum)七行Task Duration(us)之和；最后一次转置是gCumsum。核对输入和case JSON hash、轮次/样本数、硬件环境/频率/空载状态；timer前32次采样和diagnostic replay不代替普通性能。新增布局工作落在既有KKT_EPILOGUE窗口，没有新timer字段或更改布局。
+
+---
+
+# 历史：Prepare K32 开发期验证记录
 
 初始日期：2026-10-14；实测分析更新：2026-10-15。候选分支 `codex/gdn-prepare-k32`，从 `codex/gdn-profiling` / `809bce6887639e831caa856b8ac3a197a6a94294` 创建。方案见 [prepare_k32_design.md](prepare_k32_design.md)。当前完成候选设计、编码、离线检查、三轮B及三轮同日A的普通性能分析；用户报告本轮精度测试全部通过。case0七kernel合计均值相对同日A下降5.424%，达到≥5%均值目标；完整支持范围的ATK正式验收仍待完成。本记录保留至设备验收完成，届时按阶段05收敛结果至对应 ATK README。
 

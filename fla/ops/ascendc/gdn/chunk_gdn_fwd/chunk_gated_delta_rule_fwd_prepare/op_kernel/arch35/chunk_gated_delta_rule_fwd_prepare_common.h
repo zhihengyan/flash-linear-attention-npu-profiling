@@ -380,7 +380,8 @@ struct PrepareState {
 constexpr uint32_t kPrepareKb = 1024;
 constexpr uint32_t kVecFp32 = 64 * static_cast<uint32_t>(sizeof(float));
 
-// UB resident. [0, 0.5) KiB is an unused hole so later offsets stay put.
+// UB resident. NZ8 gather indices reuse 256 B of the old [0, 0.5) hole.
+constexpr uint32_t kUbS3UploadIdx = 0;
 constexpr uint32_t kUbVcsIdx = 512;
 constexpr uint32_t kUbIVcs = 1 * kPrepareKb;
 constexpr uint32_t kUbGPrime0 = 9 * kPrepareKb;
@@ -426,6 +427,17 @@ constexpr uint32_t kUbS2Kkt[2] = {kUbS2KktPing, kUbS2KktPong};
 constexpr uint32_t kUbS3LPacked[2] = {10 * kPrepareKb, 50 * kPrepareKb};
 constexpr uint32_t kUbS3ResVcs[2] = {18 * kPrepareKb, 58 * kPrepareKb};
 constexpr uint32_t kUbS3LFull[2] = {34 * kPrepareKb, 74 * kPrepareKb};
+
+// S3 upload scratch reuses S1 hat/rstd after all Stage1 tasks have drained.
+// Each slot: 64x64 -L NZ8 followed by two compact 32x32 leaf NZ8 tiles.
+// Keep both gate slots ending at 90 KiB and shared KKT starting at 140 KiB.
+constexpr uint32_t kS3NegLNzElems = kChunk64 * kChunk64;
+constexpr uint32_t kS3UploadNzElems = kS3NegLNzElems + kVcsPackedElems32;
+constexpr uint32_t kUbS3UploadNz[2] = {90 * kPrepareKb, 114 * kPrepareKb};
+static_assert(kUbS3UploadIdx + kVecFp32 <= kUbVcsIdx);
+static_assert(kUbS3UploadNz[0] >= kUbS3LFull[1] + kS3NegLNzElems * sizeof(float));
+static_assert(kUbS3UploadNz[0] + kS3UploadNzElems * sizeof(float) <= kUbS3UploadNz[1]);
+static_assert(kUbS3UploadNz[1] + kS3UploadNzElems * sizeof(float) <= kUbS2KktPing);
 
 // UB S7 Fixpipe destinations. One AIV owns two tasks in a pack.
 constexpr uint32_t kUbS7W[2] = {172 * kPrepareKb, 188 * kPrepareKb};

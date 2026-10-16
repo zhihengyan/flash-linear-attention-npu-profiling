@@ -2,6 +2,8 @@
 
 基线：main 分支 `90176b44321ebdbf3ae2a9057243157d7085c6e1`。本次仅增加诊断计时；公式、task 划分、原有 event/flag、工作区和输出数值沿用基线。公开算子入口为 ChunkGatedDeltaRuleFwd；其内部覆盖 Arch22/Arch35 Phase6 和 A5 Prepare/H/O 两条路径。
 
+当前 `codex/gdn-stage3-nz-upload` 性能候选保留计时布局和scope清单，Prepare的KKT_EPILOGUE窗口包含新的−L/leaf NZ8打包、批量上传及一对额外V_MTE3事件，因此不能将其解释为原条带上传窗口或纯VCS时间。此次增加的是业务同步，计时本身仍为NoBarrier。当前实现详见 [Stage3方案](prepare_stage3_nz_upload_design.md)，待设备状态见 [validation.md](validation.md)。
+
 ## 改造前执行流程
 
 下图为原始业务调用链，计时仅附着在节点边界。`动态`表示每核的 task/batch/head/chunk 或 tile 循环；`固定`表示每次 kernel 启动一次。下发窗口的返回不等于异步运算完成。
@@ -235,27 +237,27 @@ ACLNN launch（host，固定） → stream 同步（采集端，位于性能循�
 | W_MM | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/op_kernel/internal/operators/recompute_w_u_fwd/op_kernel/recompute_w_u_fwd_cube.h:370` | `BlockMmadW(tensorBlockA, tensorBlockKbgExp, tensorBlockW, actualBlockShape);` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
 | WU_PREPARE | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/op_kernel/internal/operators/recompute_w_u_fwd/op_kernel/recompute_w_u_fwd_vector.h:172` | `#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310` | AIV | NoBarrier 调用/下发窗口；原同步保留 |
 | WU_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/op_kernel/internal/operators/recompute_w_u_fwd/op_kernel/recompute_w_u_fwd_vector.h:207` | `Arch::CrossCoreWaitFlag(flagAicSlotFree);` | AIV | 原 wait 返回；等待窗口 |
-| FRONT_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:324` | `WaitAicStage4Done(taskIdx);` | AIC/AIV | 原 wait 返回；等待窗口 |
-| FRONT_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:345` | `WaitAicStage4Done(taskIdx);` | AIC/AIV | 原 wait 返回；等待窗口 |
-| FRONT_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:365` | `WaitAicStage4Done(taskIdx);` | AIC/AIV | 原 wait 返回；等待窗口 |
-| PREPARE_NORM_GATE | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:422` | `const int32_t db = PingPongSlot(taskIdx);` | AIV | NoBarrier 调用/下发窗口；原同步保留 |
-| KKT_MM | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:481` | `const int32_t bt = static_cast<int32_t>(chunkSize);` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
-| PREPARE_KKT_GATE | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:506` | `const int32_t db = PingPongSlot(taskIdx);` | AIV | NoBarrier 调用/下发窗口；原同步保留 |
-| KKT_EPILOGUE | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:518` | `WaitCubeKktDone(taskIdx);` | AIV | NoBarrier 调用/下发窗口；原同步保留 |
-| PREPARE_SOLVE_PREFILL | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:554` | `MmadL0ABToL0C<float>(l0Af[0], l0Bf[0], l0CTask[t], bt, bt, bt, true, bank);` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
-| PREPARE_SOLVE_ISSUE | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:566` | `const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
-| PREPARE_SOLVE_DUMP | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:579` | `const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
-| SOLVE | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:600` | `const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);` | AIC/AIV | NoBarrier 调用/下发窗口；原同步保留 |
-| PREPARE_SOLVE_DUMP | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:627` | `const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
-| WU_PREPARE | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:657` | `const int64_t hk = hv / HRatio;` | AIV | NoBarrier 调用/下发窗口；原同步保留 |
-| W_MM | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:723` | `WuMatmulToL0C<InDtype>(l1A[taskIdx], l1Kbg[taskIdx], l0AS7[0], l0BS7[0], l0CS7[0], bt, static_cast<int32_t>(nK` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
-| U_MM | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:737` | `WuMatmulToL0C<InDtype>(l1A[taskIdx], l1Vb[taskIdx], l0AS7[1], l0BS7[1], l0CS7[1], bt,` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
-| U_MM | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:755` | `WuMatmulToL0C<InDtype>(l1A[taskIdx], l1Vb1[taskIdx], l0AS7[1], l0BS7[1], l0CS7[1], bt,` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
-| FRONT_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:824` | `WaitAicStage7Done();` | AIC/AIV | 原 wait 返回；等待窗口 |
-| FRONT_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:861` | `WaitAicStage7Done();` | AIC/AIV | 原 wait 返回；等待窗口 |
-| FRONT_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:888` | `WaitAivStage1Done(t);` | AIC/AIV | 原 wait 返回；等待窗口 |
-| FRONT_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:899` | `WaitAivStage3Done(0);` | AIC/AIV | 原 wait 返回；等待窗口 |
-| FRONT_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:905` | `WaitAivStage3Done(t);` | AIC/AIV | 原 wait 返回；等待窗口 |
-| FRONT_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:925` | `WaitAivStage6Done(t);` | AIC/AIV | 原 wait 返回；等待窗口 |
+| FRONT_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:331` | `WaitAicStage4Done(taskIdx);` | AIC/AIV | 原 wait 返回；等待窗口 |
+| FRONT_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:352` | `WaitAicStage4Done(taskIdx);` | AIC/AIV | 原 wait 返回；等待窗口 |
+| FRONT_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:372` | `WaitAicStage4Done(taskIdx);` | AIC/AIV | 原 wait 返回；等待窗口 |
+| PREPARE_NORM_GATE | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:429` | `const int32_t db = PingPongSlot(taskIdx);` | AIV | NoBarrier 调用/下发窗口；原同步保留 |
+| KKT_MM | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:488` | `const int32_t bt = static_cast<int32_t>(chunkSize);` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
+| PREPARE_KKT_GATE | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:513` | `const int32_t db = PingPongSlot(taskIdx);` | AIV | NoBarrier 调用/下发窗口；原同步保留 |
+| KKT_EPILOGUE | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:525` | `WaitCubeKktDone(taskIdx);` | AIV | NoBarrier 调用/下发窗口；含Stage3新增打包及V_MTE3事件 |
+| PREPARE_SOLVE_PREFILL | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:566` | `MmadL0ABToL0C<float>(l0Af[0], l0Bf[0], l0CTask[t], bt, bt, bt, true, bank);` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
+| PREPARE_SOLVE_ISSUE | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:578` | `const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
+| PREPARE_SOLVE_DUMP | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:591` | `const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
+| SOLVE | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:612` | `const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);` | AIC/AIV | NoBarrier 调用/下发窗口；原同步保留 |
+| PREPARE_SOLVE_DUMP | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:639` | `const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
+| WU_PREPARE | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:669` | `const int64_t hk = hv / HRatio;` | AIV | NoBarrier 调用/下发窗口；原同步保留 |
+| W_MM | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:735` | `WuMatmulToL0C<InDtype>(l1A[taskIdx], l1Kbg[taskIdx], l0AS7[0], l0BS7[0], l0CS7[0], bt, static_cast<int32_t>(nK` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
+| U_MM | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:749` | `WuMatmulToL0C<InDtype>(l1A[taskIdx], l1Vb[taskIdx], l0AS7[1], l0BS7[1], l0CS7[1], bt,` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
+| U_MM | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:767` | `WuMatmulToL0C<InDtype>(l1A[taskIdx], l1Vb1[taskIdx], l0AS7[1], l0BS7[1], l0CS7[1], bt,` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
+| FRONT_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:836` | `WaitAicStage7Done();` | AIC/AIV | 原 wait 返回；等待窗口 |
+| FRONT_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:873` | `WaitAicStage7Done();` | AIC/AIV | 原 wait 返回；等待窗口 |
+| FRONT_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:900` | `WaitAivStage1Done(t);` | AIC/AIV | 原 wait 返回；等待窗口 |
+| FRONT_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:911` | `WaitAivStage3Done(0);` | AIC/AIV | 原 wait 返回；等待窗口 |
+| FRONT_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:917` | `WaitAivStage3Done(t);` | AIC/AIV | 原 wait 返回；等待窗口 |
+| FRONT_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h:937` | `WaitAivStage6Done(t);` | AIC/AIV | 原 wait 返回；等待窗口 |
 
 当前共有 195 个动态 scope。每次诊断分配 5652544 个 int64（43.13 MiB）；采样 32 次/类型/核，实际调用总数另存。

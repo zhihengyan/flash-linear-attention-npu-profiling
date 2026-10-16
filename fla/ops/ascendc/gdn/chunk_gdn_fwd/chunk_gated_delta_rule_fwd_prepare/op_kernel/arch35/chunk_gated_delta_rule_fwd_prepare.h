@@ -149,6 +149,10 @@ public:
         // 496 KiB of 512 KiB.
         // =====================================================================
 
+        // UB[0, 0.25) KiB: resident indices for Stage3 NZ8 Gather.
+        ubS3UploadIdx = buf.template GetBuffer<BufferType::ASCEND_UB, uint32_t>(kUbS3UploadIdx);
+        ubS3UploadIdx.SetSize(kChunk64);
+
         // UB[0.50, 1.00) KiB = 512 B, uint32. Only the first 8 values are used.
         // VCS scatter index for packing two 32x32 leaves into I_vcs 32x64:
         // values are {0, 32} (left leaf at col 0, right leaf at col 32).
@@ -196,6 +200,8 @@ public:
             ubLPacked[db] = buf.template GetBuffer<BufferType::ASCEND_UB, float>(kUbS3LPacked[db]);
             ubResVcs[db] = buf.template GetBuffer<BufferType::ASCEND_UB, float>(kUbS3ResVcs[db]);
             ubLFull[db] = buf.template GetBuffer<BufferType::ASCEND_UB, float>(kUbS3LFull[db]);
+            ubS3UploadNz[db] = buf.template GetBuffer<BufferType::ASCEND_UB, float>(kUbS3UploadNz[db]);
+            ubS3UploadNz[db].SetSize(kS3UploadNzElems);
         }
 
         // AIV UB HardEvent ids: kHeUb0, kHeUb1, kHeS3Pack (common.h).
@@ -259,6 +265,7 @@ public:
         if (auxReady != 0) {
             return;
         }
+        FillS3Nz8GatherIndexVF(ubS3UploadIdx);
         FillVcsIdentity(ubIVcs, ubVcsIdx);
         // Leaf zeros first so both AIVs copy in parallel. ubS0Zero is then
         // free for AIV0 to paint I. AIV1 can leave for Stage1 while AIV0
@@ -525,11 +532,16 @@ public:
             PackDiagLeavesFromUb(ubLPacked[db], ubLFull[db]);
             SetFlag<HardEvent::MTE3_V>(kHeS3Pack);
             WaitFlag<HardEvent::MTE3_V>(kHeS3Pack);
-            UbNd64ToL1Nz8(l1NegL[taskIdx], ubLFull[db]);
-            MulReduceScatterVF32(ubResVcs[db], ubLPacked[db], ubResVcs[db], ubVcsIdx);
+            PackStage3Nz8VF<64, 1>(ubLFull[db], ubS3UploadNz[db], ubS3UploadIdx);
             SetFlag<HardEvent::V_MTE3>(kHeUb0);
             WaitFlag<HardEvent::V_MTE3>(kHeUb0);
-            UploadDiagLeavesToL1(l1LeafRight[taskIdx], l1LeafLeft[taskIdx], ubResVcs[db]);
+            UploadStage3NegLNzToL1(l1NegL[taskIdx], ubS3UploadNz[db]);
+            MulReduceScatterVF32(ubResVcs[db], ubLPacked[db], ubResVcs[db], ubVcsIdx);
+            LocalTensor<float> leafNz = ubS3UploadNz[db][kS3NegLNzElems];
+            PackStage3Nz8VF<32, 2>(ubResVcs[db], leafNz, ubS3UploadIdx);
+            SetFlag<HardEvent::V_MTE3>(kHeUb0);
+            WaitFlag<HardEvent::V_MTE3>(kHeUb0);
+            UploadStage3LeafNzToL1(l1LeafRight[taskIdx], l1LeafLeft[taskIdx], leafNz);
             NotifyAicStage3Done(taskIdx);
     }
 
@@ -984,7 +996,7 @@ private:
     // Local
     // UB
     // S0
-    LocalTensor<uint32_t> ubVcsIdx;
+    LocalTensor<uint32_t> ubVcsIdx, ubS3UploadIdx;
     LocalTensor<float> ubIVcs, ubS0Zero;
 
     // S1
@@ -996,6 +1008,7 @@ private:
     LocalTensor<float> ubKkt[2];
 
     LocalTensor<float> ubLPacked[2], ubResVcs[2], ubLFull[2];
+    LocalTensor<float> ubS3UploadNz[2];
 
     LocalTensor<InDtype> ubS6K[2], ubS6V[2];
     LocalTensor<InDtype> ubS7W[2], ubS7U[2];

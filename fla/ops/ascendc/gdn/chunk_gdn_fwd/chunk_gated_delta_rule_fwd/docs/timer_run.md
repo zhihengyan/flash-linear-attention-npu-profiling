@@ -40,6 +40,8 @@ python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --dev
 
 默认执行原 `atk_chunk_gated_delta_rule_fwd_perf.json` 的 case 0/1；可用 `--cases 0` 或 `--cases 1` 选择。脚本按当前 wheel 路径注册 OPP，再检查 ATK/Python、npu-smi、安装产物和 Profile 符号，运行原 ATK performance_device。executor 仅在性能循环外保存该 case 的真实输入值与全部参数；随后同输入普通/诊断调用进行十项输出精确对照，导出 raw、CSV、layout/capture/run metadata 与日志。原 CPU/六 ACLNN 比较规则和性能统计不变。本入口是采集工具，完整精度/确定性/内存验收仍执行 ATK 原 all。
 
+当前Stage3实验分支移植了可选归档wheel校验：`--reference-wheel "$WHEEL_PATH"`。默认仍比较当前build staging；切换归档K32/B wheel且保留另一版本build时，应安装指定wheel并在同一份采集脚本上添加该参数。脚本直接核对安装产物与wheel中的`.so`/`.o`/Python/配置，支持wheel根目录及`.data/purelib`、`.data/platlib`布局；不匹配仍报错。metadata记录wheel SHA256，`source_commit_role=profiling_checkout`说明source_commit仅标识采集脚本checkout，各wheel的源码/构建日志仍须单独保存。当前实验状态和完整A/B命令见 [validation.md](validation.md)。
+
 默认结果在 `tests/atk/chunk_gated_delta_rule_fwd/atk_output/gdn_timer_<时间戳>_<随机标识>/`（仓库已忽略 atk_output）。也可用 `--output-dir` 指定一个尚不存在的目录。查看 run_metadata.json 的 status、原性能报告及实际成功用例，再看 timer/case_N 的 capture_metadata.json、timer_layout.json、gdn_npu_time_parsed.csv。采样 actual/sampled/truncated 字段给出每核每阶段计数；出现截断只能分析前 32 个调用。
 
 原始数据留在内部环境时，使用 tests/ut/summarize_timer.py 生成小型 brief.txt 及阶段/逐核汇总，首轮只需粘贴摘要。命令、指标含义与分析顺序见 [timer_analysis.md](timer_analysis.md)。
@@ -61,11 +63,10 @@ python fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut/pro
 
 ## 回归与开关对照
 
-先运行源码检查与离线单元测试：
+原计时接入分支的 `check_timer_source.py` 比对固定main的同步文本，不能用于当前性能候选的同步等价判定（K32增加专用helper，Stage3实验增加一对V_MTE3）。当前候选使用以下包含历史K32、当前Stage3、wheel校验及timer/摘要的离线单元测试；原检查器未放宽：
 
 ```bash
-python fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut/check_timer_source.py
-python -m unittest discover -s fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut -p test_timer_contract.py -v
+python -m unittest discover -s fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut -p 'test_*.py' -v
 ```
 
 设备回归：按 tests/atk/README.md 准备包内 OPP 后分别执行四个受影响算子 chunk_gated_delta_rule_fwd、chunk_gated_delta_rule_fwd_prepare、chunk_fwd_h、chunk_fwd_o 的 `bash tests/atk/run_test_cpu.sh -op=算子名 -npu_device_id=0 -soc=ascend950 -scope=all`；随后运行 `python examples/flash_gated_delta_rule.py`。A2/A3 按各自支持范围和 ATK README 执行，不把未选中的 key 记为覆盖。
