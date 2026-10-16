@@ -118,4 +118,6 @@ python torch_custom/fla_npu/test/test_aclnn_ctypes_abi.py NormOutputsTest --npu
 
 从仓库根目录运行 `python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --device 0`，沿用本目录原两个 A5 性能 case、输入生成器和执行器；输入快照、同输入普通/诊断对照与 raw/CSV 导出均在原性能循环外。预检及实际 kernel 报告校验、构建安装步骤、结果阅读见 [timer_run.md](../../../fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/docs/timer_run.md)，本次状态见 [timer_report.md](../../../fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/docs/timer_report.md)。
 
+Stage5 A直供L1实验沿用上述原入口；若轮流安装归档K32/B wheel而build属于另一版本，可追加`--reference-wheel "$WHEEL_PATH"`严格核对安装产物与当前安装的wheel。候选设计、离线结果及待设备项见 [开发期验证记录](../../../fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/docs/validation.md)，未新增设备通过结论。
+
 2026-10-12：计时源码接入后，14 项离线 timer/采集证据合同测试与 3 项既有 GDN 生产 wrapper 契约定向回归通过；原数学标杆、值域、比较阈值和 case JSON 未改动。当前 Windows 环境没有 CANN/NPU/torch，本轮未进行正式 ATK、Example/ST 或真实 profiling 验收，不能沿用本 README 历史设备结论作为本轮验证。设备待验项集中在 timer_report。

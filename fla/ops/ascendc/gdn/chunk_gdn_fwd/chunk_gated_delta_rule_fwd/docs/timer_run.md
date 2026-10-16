@@ -40,6 +40,8 @@ python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --dev
 
 默认执行原 `atk_chunk_gated_delta_rule_fwd_perf.json` 的 case 0/1；可用 `--cases 0` 或 `--cases 1` 选择。脚本按当前 wheel 路径注册 OPP，再检查 ATK/Python、npu-smi、安装产物和 Profile 符号，运行原 ATK performance_device。executor 仅在性能循环外保存该 case 的真实输入值与全部参数；随后同输入普通/诊断调用进行十项输出精确对照，导出 raw、CSV、layout/capture/run metadata 与日志。原 CPU/六 ACLNN 比较规则和性能统计不变。本入口是采集工具，完整精度/确定性/内存验收仍执行 ATK 原 all。
 
+Stage5实验分支保留可选`--reference-wheel "$WHEEL_PATH"`：默认仍与当前build staging比较，轮流装归档K32/B wheel且保留另一版本build时，可指定当前安装的准确wheel。脚本严格核对.so/.o/Python/配置，支持根目录及.data/purelib、.data/platlib布局，不匹配仍报错。metadata记录wheel SHA256及`source_commit_role=profiling_checkout`，各wheel自身源码/构建日志仍须单独保存。本轮候选状态及A/B步骤见 [validation.md](validation.md)。
+
 默认结果在 `tests/atk/chunk_gated_delta_rule_fwd/atk_output/gdn_timer_<时间戳>_<随机标识>/`（仓库已忽略 atk_output）。也可用 `--output-dir` 指定一个尚不存在的目录。查看 run_metadata.json 的 status、原性能报告及实际成功用例，再看 timer/case_N 的 capture_metadata.json、timer_layout.json、gdn_npu_time_parsed.csv。采样 actual/sampled/truncated 字段给出每核每阶段计数；出现截断只能分析前 32 个调用。
 
 原始数据留在内部环境时，使用 tests/ut/summarize_timer.py 生成小型 brief.txt 及阶段/逐核汇总，首轮只需粘贴摘要。命令、指标含义与分析顺序见 [timer_analysis.md](timer_analysis.md)。
@@ -61,11 +63,10 @@ python fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut/pro
 
 ## 回归与开关对照
 
-先运行源码检查与离线单元测试：
+原计时接入分支的check_timer_source.py用于与固定main比较同步文本，不能判定当前K32/Stage5性能候选的同步等价性。本候选用以下历史K32、当前Stage5、wheel及timer检查；原检查器未放宽：
 
 ```bash
-python fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut/check_timer_source.py
-python -m unittest discover -s fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut -p test_timer_contract.py -v
+python -m unittest discover -s fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut -p 'test_*.py' -v
 ```
 
 设备回归：按 tests/atk/README.md 准备包内 OPP 后分别执行四个受影响算子 chunk_gated_delta_rule_fwd、chunk_gated_delta_rule_fwd_prepare、chunk_fwd_h、chunk_fwd_o 的 `bash tests/atk/run_test_cpu.sh -op=算子名 -npu_device_id=0 -soc=ascend950 -scope=all`；随后运行 `python examples/flash_gated_delta_rule.py`。A2/A3 按各自支持范围和 ATK README 执行，不把未选中的 key 记为覆盖。

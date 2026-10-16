@@ -1,4 +1,81 @@
-# Prepare K32 开发期验证记录
+# 当前实验：Stage5 A 直接供 L1（2026-10-16）
+
+当前分支 `codex/gdn-stage5-a-direct-l1`，直接基于K32 `d0cb628df7c8c23c0342392dfaf4ec910aba9947`。前轮已放弃的Stage3实验与全部分析文档已提交至其原分支，提交为 `21d9998a`。本分支不继承Stage3/N32/Block32的kernel改动。方案见 [prepare_stage5_a_direct_l1_design.md](prepare_stage5_a_direct_l1_design.md)，以下为本轮待设备验证记录，后文K32结果仅为历史基线。
+
+## 本轮范围与性能追踪
+
+| 项目 | 实现或证据 | 状态 |
+| --- | --- | --- |
+| K32 A | 最近普通case0七项1610.88620us，Prepare620.28335us；K32用户已报告精度通过 | 业务基线；本候选仍需同条件新鲜对照 |
+| Stage5 A直接供L1 B | 完整chunk/outputA=true保留GM A写出，以原DumpAL0cToL1替换GM→L1回读；Stage7统一等FIX_MTE1 | 已接入普通/Profile共享Prepare实现，无实验开关；设备结果待采 |
+| 减量与代价 | case0 5632tasks少读44MiB GM地址数据，新增5632次8KiB Fixpipe | 不等于HBM流量或已测净收益；PIPE_FIX竞争、L0C占用和Stage6隐藏程度待测 |
+| 参考收益 | 约2.7%=净省43.4939274us，如全来自Prepare则7.011945% | 用户未设3%/2.7%硬门槛；不因理论字节减少宣称达标 |
+
+生产kernel仅修改Prepare arch35主头的Stage5_Dump及ProcessAic中对应的A-ready等待，另有注释更新。K32 MMAD、VCS、Stage1–4/6–7计算、内存分配、Y workspace、host/ABI、入口及H/O保持。tail/outputA=true原FIX_MTE2对保留，outputA=false原单次L1 Fixpipe行为保持；完整chunk不再发布A的MTE2_MTE1事件，消费者相应改等FIX_MTE1。Stage4 Y的MTE2_MTE1及pack起止FIX_MTE1(0) credit保持，防止漏消费或重复credit。两次输出均在FIX_M credit之前，L0C不得提前复用。
+
+采用阶段03 V2、CHUNK_INDEPENDENT V1参考（来源 `a78efa9512dfa64c20b2a58a75e84e88a054d694`）；工程参考为K32自身的直接输出路径。原task映射和Vector→Cube数据流保持，不声称完成R01/R06迁移。按照用户已有授权跳过逐Stage设备验证的编码门槛，完成整链接入；正式精度/MSS/确定性/Example/ST仍须原标准验收。
+
+## 离线检查与本机限制
+
+Windows本机没有CANN/NPU/AscendC编译器，Python3.12.14 / NumPy2.3.5。已执行：
+
+```bash
+python -m unittest discover -s fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd/tests/ut -p 'test_*.py' -v
+```
+
+50项全部通过（8.961s）：当前Stage5六项、冻结历史K32四项、timer/摘要25项、归档wheel校验15项。补充混合full/tail连续pack模型后，定向六项复测通过（2.429s）。Stage5检查从真实C++读取分支、Fixpipe字段和事件：
+
+- FP32 L0C NZ16→BF16 L1 NZ16与独立GM ND→NZ编码对照，非对称数据、RNE边界、±0/有限值、valid1..64有效GM范围、canary及错误stride/转置负例。
+- full/tail与outputA开关的实际分支trace；tail/a0与K32一致，GM输出参数与offset保持，两次输出先于FIX_M释放。
+- G1/2/3/4对应pack3/4、partial pack1..capacity、连续五pack与混合full/tail的A/Y事件token模型；旧A回读wait负例能发现未配对等待。
+- 其余源码逐token对照K32，包括全部helper、Stage7/V128/256分支、普通/Profile入口与host；timer scope名称、布局保持，清单行号更新。
+
+以上不是硬件指令仿真或实际调度记录。token模型不能证明动态pipe时序；V128/256的依据是Stage7源码与资源保持，并非设备case已运行。编译、真实BF16舍入、硬件同步、普通/Profile输出对照、正式CPU精度、MSS、确定性与性能均待设备验证；不沿用前轮已放弃实验的设备结果。
+
+采集脚本仅移植前轮已验证的可选归档wheel核对功能和15项测试（从 `21d9998a` 取对应文件）。默认命令不变，默认校验安装产物与本轮build；`--reference-wheel`严格核对安装文件与指定wheel，支持根目录/purelib/platlib布局。输入生成器、case、普通预热/采样配置和精度阈值均未更改。
+
+## 设备验证：沿用原入口
+
+在原Linux CANN/Python/ATK环境的仓库根目录，确认本分支源码，构建后将末尾打印的准确wheel路径设为 `WHEEL_PATH`：
+
+```bash
+git switch codex/gdn-stage5-a-direct-l1
+git status --short
+FLA_NPU_SOC=ascend950 FLA_NPU_OPS= python scripts/build_wheel.py
+python -m pip install --force-reinstall --no-cache-dir --no-deps "$WHEEL_PATH"
+python scripts/verify_libcust_opapi_md5.py --python
+```
+
+保持用户此前wheel交付方式，不变更构建或安装机制。必须保存实际wheel、源码commit及构建/安装校验日志，测试使用新Python进程。该共享实现由独立Prepare和前向普通/Profile调用消费，均需要验证。
+
+先做Prepare精度筛查，可沿用后文96条G2 full/tail与outputA开关筛查；采用前仍需Prepare原2416条及MSS/确定性，覆盖G1/2/3/4、V128/256、varlen、partial pack、有效长度32/64边界和同核连续pack。前向原500条双标杆分片入口：
+
+```bash
+bash tests/atk/chunk_gated_delta_rule_fwd/scripts/run_matrix.sh 0
+```
+
+精度通过后性能仍用原命令（默认case0/1）：
+
+```bash
+python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --device 0
+```
+
+空载卡为device1时所有精度/性能命令一致改成1，A/B使用同一张卡。聚焦case0可加`--cases 0`，建议K32/B/K32交错且各至少3轮独立进程；普通20组采样与诊断warmup5的含义保持。每轮带回run_metadata.json、普通op_summary.csv与精度结果；timer/case_0数据或摘要按需补充。固定每次七项Task Duration合计为主指标，附Prepare/H/O变化与输入/case哈希，timer/pipe只辅助定位。
+
+在同一采集checkout轮流安装归档K32和B wheel时，指定当前实际安装的那份：
+
+```bash
+python -m pip install --force-reinstall --no-cache-dir --no-deps "$WHEEL_PATH"
+python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --device 0 --cases 0 --reference-wheel "$WHEEL_PATH"
+```
+
+默认模式要求安装产物与本轮build匹配；reference模式要求与指定wheel的.so/.o/Python/配置一致，任何不匹配都应处理，不能跳过校验。metadata的source_commit是采集checkout，归档wheel自身的源码/构建身份仍需独立保存。完整设备命令及解释见 [timer_run.md](timer_run.md)。
+
+如果额外Fixpipe抵消收益，或原回读已经被Stage6隐藏，停止此单变量候选；精度失败按原定位路由处理，不放宽阈值。阶段05正式完成前保留本开发期记录。
+
+---
+
+# 历史：Prepare K32 开发期验证记录
 
 初始日期：2026-10-14；实测分析更新：2026-10-15。候选分支 `codex/gdn-prepare-k32`，从 `codex/gdn-profiling` / `809bce6887639e831caa856b8ac3a197a6a94294` 创建。方案见 [prepare_k32_design.md](prepare_k32_design.md)。当前完成候选设计、编码、离线检查、三轮B及三轮同日A的普通性能分析；用户报告本轮精度测试全部通过。case0七kernel合计均值相对同日A下降5.424%，达到≥5%均值目标；完整支持范围的ATK正式验收仍待完成。本记录保留至设备验收完成，届时按阶段05收敛结果至对应 ATK README。
 

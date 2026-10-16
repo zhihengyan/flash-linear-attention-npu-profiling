@@ -593,8 +593,9 @@ public:
     // Y @ LeafRight accumulate. Intra-task second Load uses L0 [32,48)/[48,64)
     // so MTE1 overlaps the first Cube M. Dump stays per-task after both MMADs.
     // Left has only K=[32,64) rows; Right has only K=[0,32) rows.
-    // Full chunk + outputA: L0C→gmA (valid M rows) then Nd2Nz back to L1.
-    // Tail or outputA=0: L0C→L1 NZ directly (padding rows stay in L0C).
+    // A always goes L0C→L1 NZ directly. outputA also retains the public
+    // GM ND output (valid M rows); full chunks no longer reload that GM A.
+    // Both Fixpipe reads precede the FIX_M credit protecting L0C reuse.
     __aicore__ inline void Stage5_Compute(int64_t taskIdx)
     {
         GDN_TIMER_SCOPE(timer_, SOLVE);
@@ -632,19 +633,15 @@ public:
             WaitFlag<HardEvent::M_FIX>(bank);
             if (outputA != 0) {
                 FixpipeL0cToGmNd<InDtype>(gmA[offA], l0CTask[taskIdx], m, n, n);
-                SetFlag<HardEvent::FIX_MTE2>(bank);
-                WaitFlag<HardEvent::FIX_MTE2>(bank);
-                if (m == n) {
-                    CopyGmNdToL1Nz<InDtype>(l1A[taskIdx], gmA[offA], n, n);
-                    SetFlag<HardEvent::MTE2_MTE1>(taskIdx);
-                } else {
-                    DumpAL0cToL1(taskIdx, n);
-                    SetFlag<HardEvent::FIX_MTE1>(taskIdx);
+                // Preserve the existing tail path; the experiment replaces
+                // only full-chunk A's GM→L1 copy and its ready dependency.
+                if (m != n) {
+                    SetFlag<HardEvent::FIX_MTE2>(bank);
+                    WaitFlag<HardEvent::FIX_MTE2>(bank);
                 }
-            } else {
-                DumpAL0cToL1(taskIdx, n);
-                SetFlag<HardEvent::FIX_MTE1>(taskIdx);
             }
+            DumpAL0cToL1(taskIdx, n);
+            SetFlag<HardEvent::FIX_MTE1>(taskIdx);
             SetFlag<HardEvent::FIX_M>(bank);
     }
 
@@ -928,11 +925,8 @@ public:
                 ChunkRange chunk;
                 int64_t hv;
                 DecodeTask(cur.base, cur.nThis, t, chunk, hv);
-                if (outputA != 0 && chunk.M == chunkSize) {
-                    WaitFlag<HardEvent::MTE2_MTE1>(t);
-                } else {
-                    WaitFlag<HardEvent::FIX_MTE1>(t);
-                }
+                // Stage5 supplies A directly from Fixpipe for every task.
+                WaitFlag<HardEvent::FIX_MTE1>(t);
                 Stage7_AicOne(chunk, hv, t);
             }
             const int64_t nextPack = pack + numCore;

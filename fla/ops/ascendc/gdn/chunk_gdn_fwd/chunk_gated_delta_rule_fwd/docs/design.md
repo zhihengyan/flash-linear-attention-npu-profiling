@@ -1,5 +1,7 @@
 # GDN 计时接入设计
 
+当前独立实验为 [Stage5 A直接供L1](prepare_stage5_a_direct_l1_design.md)，分支 `codex/gdn-stage5-a-direct-l1`，直接基于K32 `d0cb628d`。保留GM A输出，使用已有Fixpipe路径给L1供数，普通/Profile共享实现；Stage3/N32/Block32修改均不继承。下文计时与K32设计保留为历史基线，设备状态见 [validation.md](validation.md)。
+
 当前规则版本：V2。本设计仅描述诊断增量；基线为 main `90176b44321ebdbf3ae2a9057243157d7085c6e1`。按仓库阶段 03→04→05 路由读取现有实现、ChunkFwdH 设计、原 ATK generator/executor/reference。采用 CHUNK_DEPENDENT V1 开发参考（来源 commit a14961e9dfe8c8264768d67fb447101873da4ecf）的现有 H 状态依赖链，不改算子调度。host/kernel/调用层接入技术写法参考本地 timer_by_skill 的已存在诊断实现；本轮新增完整关键运算与循环观测、布局 v2 和独立源码审核，未沿用旧审核结论。
 
 计算链保持：KKT=KKᵀ 的 gate/下三角系数 → solve → W/U；H 内 WH、vNew=U−WH、KV、状态更新；O 内 QK、QH、causal mask/gate、Attn×vNew、输出融合。原 fixed/varlen、head ratio、BT64/128、V128/256、initial/final state、B30 和 H/O idle/pipeline 分支均保持。原图、关键步骤与源码配对清单由 [timer_flow.md](timer_flow.md) 定义。
