@@ -409,6 +409,17 @@ private:
         return localHeads;
     }
 
+    __aicore__ inline bool UseEarlyRightReady(const FwdHWorkUnit &unit) const
+    {
+        if constexpr (CompilePolicy::STATE_FP32 &&
+                      CompilePolicy::GATE_MODE == FwdHGateMode::SCALAR_G) {
+            // At most one head per AIV: D may reuse the right slot as soon as
+            // its MTE3 read ends. V_new resides in a separate work bank.
+            return unit.headRound.activeHeadCount <= FWD_H_AIV_COUNT;
+        }
+        return false;
+    }
+
     __aicore__ inline AscendC::LocalTensor<uint8_t> LocalSlot(uint32_t slot)
     {
         return UbAt<uint8_t>(slot * FWD_H_UB_LOCAL_SLOT_BYTES);
@@ -705,15 +716,27 @@ private:
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(IoDoneEvent(slot));
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(IoDoneEvent(slot));
             }
+            const bool earlyRightReady = UseEarlyRightReady(unit);
+            if constexpr (WRITE_RIGHT) {
+                if (earlyRightReady) {
+                    const uint64_t rightOffset = FwdHCoreSlotOffset(coreIdx_, head.roundHead,
+                                                                    FWD_H_CHUNK * FWD_H_V);
+                    AscendC::DataCopy(rightGm[rightOffset], RightSlot(slot), chunk.validTokens * FWD_H_V);
+                    AscendC::CrossCoreSetFlag<0x4, PIPE_MTE3>(
+                        FwdHAivLocalFlag(FWD_H_RIGHT_READY_FLAG, head.localSlot));
+                }
+            }
             AscendC::DataCopy(vNew[UOffset(unit, chunk, head)], WorkBf16Slot(inputSlot),
                               chunk.validTokens * FWD_H_V);
             if constexpr (WRITE_RIGHT) {
-                const uint64_t rightOffset = FwdHCoreSlotOffset(coreIdx_, head.roundHead,
-                                                                FWD_H_CHUNK * FWD_H_V);
-                AscendC::DataCopy(rightGm[rightOffset], RightSlot(slot), chunk.validTokens * FWD_H_V);
-                if constexpr (!CompilePolicy::STATE_FP32) {
-                    AscendC::CrossCoreSetFlag<0x4, PIPE_MTE3>(
-                        FwdHAivLocalFlag(FWD_H_RIGHT_READY_FLAG, head.localSlot));
+                if (!earlyRightReady) {
+                    const uint64_t rightOffset = FwdHCoreSlotOffset(coreIdx_, head.roundHead,
+                                                                    FWD_H_CHUNK * FWD_H_V);
+                    AscendC::DataCopy(rightGm[rightOffset], RightSlot(slot), chunk.validTokens * FWD_H_V);
+                    if constexpr (!CompilePolicy::STATE_FP32) {
+                        AscendC::CrossCoreSetFlag<0x4, PIPE_MTE3>(
+                            FwdHAivLocalFlag(FWD_H_RIGHT_READY_FLAG, head.localSlot));
+                    }
                 }
             }
             if constexpr (!CompilePolicy::STATE_FP32) {
@@ -786,7 +809,7 @@ private:
                 DispatchStage1<true>(unit, chunk, head, coreHeadId,
                                      hasP, writeRight, zeroState);
             }
-            if (writeRight) {
+            if (writeRight && !UseEarlyRightReady(unit)) {
                 // 两个 head 的 right 共用数据槽高半区。等最后一次 MTE3 读取完成后，
                 // 再按逻辑 slot 发布原有 ready，防止首个 D 提前覆盖第二个 right。
                 for (uint32_t coreHeadId = 0; coreHeadId < localHeads; ++coreHeadId) {
@@ -1148,8 +1171,8 @@ private:
             const bool hasP = !(chunk.first && args_.tiling.useInitialState == 0);
             const bool zeroState = chunk.first && args_.tiling.useInitialState == 0;
             DispatchStage1<true>(unit, chunk, head, inputSlot, hasP, writeRight, zeroState);
-            if (writeRight) {
-                // 单 head 不需要合并等待，保持一份 ready/一次消费的原协议。
+            if (writeRight && !UseEarlyRightReady(unit)) {
+                // Early-right paths publish inside DispatchStage1, before V_new.
                 AscendC::CrossCoreSetFlag<0x4, PIPE_MTE3>(
                     FwdHAivLocalFlag(FWD_H_RIGHT_READY_FLAG, head.localSlot));
             }

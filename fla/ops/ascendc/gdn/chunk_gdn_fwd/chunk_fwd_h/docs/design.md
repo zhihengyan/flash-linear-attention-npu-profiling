@@ -1,5 +1,9 @@
 # ChunkFwdH 设计
 
+方案设计规则版本：`V2`。本轮检查既有实现中受影响的 Stage1 写回和 ready/free 生命周期；
+历史 head-owner 映射及连续 head 分片保持，未迁移为 V2 R01/R20 的横切/grid-stride 模板。
+该差异与本轮参数化候选的适用域、资源和验证边界见第 10 节。
+
 ## 1. 目标与边界
 
 `ChunkFwdH` 是独立的 Ascend C 算子，符号为 `ChunkFwdH`、`aclnnChunkFwdH` 和
@@ -152,7 +156,8 @@ A5 FP32 state 的两个 local head 虽然共享一个 P/D 物理槽，跨核 fla
 right MTE3 读完高 32 KiB。为此，同一 AIV 的两次 `RIGHT_READY` 保持原 ID 和次数，由
 `PIPE_MTE3` 在两个 Stage1 都下发后统一发布。AIC 在搬入第一个 right 前等待 local slot 0 的
 `RIGHT_READY`，因此首个 D 的 Fixpipe 不会与第二个 right 的 MTE3 形成 WAR。单 head 和
-BF16 state 路径仍在各自 right 写回后立即发布 ready。
+BF16 state 路径仍在各自 right 写回后发布 ready。第 10 节的 FP32 scalar-g、每 AIV 至多一个
+head 候选将这次发布前移到 right 写回之后、公开 V_new 写回之前。
 
 Stage 内按核内 head id 统一写一套流程，`headId&1` 选择 ping/pong L0 slot。当前 slot 的
 MTE2 完成即可启动该 slot 的 VEC/Cube，不等待另一 slot；Cube->Fixpipe 和 VEC->MTE3 同理。
@@ -241,3 +246,99 @@ state dtype 的模板选择保持运行语义优先级：存在 `initial_state` 
 代码不维护手写数值 key，也不在 kernel 内使用 `TILING_KEY_IS` 做二次分派。TilingKey 数值由
 目标 CANN 根据模板声明编码，只用于 host、binary metadata 和 runtime 之间的选择闭环，不作为
 公开接口或跨版本稳定语义。
+
+## 10. H right 优先交付候选（2026-10-16）
+
+本轮唯一主要变量是 Stage1 的 MTE3 写回/通知顺序。以 K32
+`d0cb628df7c8c23c0342392dfaf4ec910aba9947` 为基线，不叠加历史双 head lookahead，
+不改变 Stage0/2 的 MMAD、H 递推、gate、cast、分核或任何公开输出。
+用户已授权整链接入，跳过逐 Stage 设备验证编码门槛；设备精度与收益仍待验证，见
+[开发验证记录](validation.md)。
+
+### 10.1 适用域与选择
+
+只在 A5 `STATE_FP32 && scalar-g && activeHeadCount<=2` 启用。head `r` 的 owner
+仍为 `r%2`，local slot 为 `r/2`；因此每个有效 AIV 只有一个 head，不存在另一 head
+尚待生成的 right。一个 head 的既有 chunk lookahead 和两个 head 的既有普通调度均可命中。
+activeHeadCount=3/4、BF16 state、gk、A2/A3 沿用基线写回和通知位置。
+这不是新增 TilingKey，gate dtype、exp/exp2、state 物理顺序、dense/varlen 和 tail 均继承。
+
+case0 为 Ascend950PR_957c，B=1、HK=16、HV=32、T=11274、K=V=128、BT=64，
+初态 FP32，保存 final_state。现有 host 在 28 AIC 上按连续 head 划分，
+headsPerCore=ceil(32/28)=2，blockDim=ceil(32/2)=16，每核一个双 head work unit、
+每 AIV 一个 head；177 chunks（176 个完整块及长度 10 的 tail）。不因物理核空闲改变分核。
+
+比较的两个合法调度是：基线 `V_new -> right -> RIGHT_READY`，候选
+`right -> RIGHT_READY -> V_new`。单独只调换两次 DataCopy 而把 ready 留在 V_new 后，
+仍会让 AIC 等到公开写回结束，因此不作为另一项叠加候选。四 head 的同一 AIV 有两个
+right 复用 UB，仍需最后一次 right MTE3 完成后统一发布，不能套用提前发布。
+
+### 10.2 地址与生命周期
+
+沿用第 5 节的全部分区和硬件容量，不增加 UB/L1/L0、GM workspace、flag 或 event。
+本候选的每 AIV 活跃地址（单位 KiB，半开区间）为：
+
+| 区间 | 数据、大小与最后消费 |
+| --- | --- |
+| UB[0,32) | P：FP32 [64,128]，32 KiB；Stage0 Fixpipe 写，Stage1 VF 末次读后 P_FREE |
+| UB[32,48) | right：BF16 [64,128]，16 KiB；Stage1 VF 写，right MTE3 完成后允许 D 覆盖 |
+| UB[48,64) | Stage1 无活跃数据；Stage2 D 使用时纳入下行 |
+| UB[0,64) | D：FP32 [128,128]，64 KiB；Stage2 Fixpipe 写，Stage3 VF 读；之后低 32 KiB 为待写 H |
+| UB[64,128) | local slot 0 rolling state：FP32 [128,128]，64 KiB，跨 chunk 常驻 |
+| UB[128,192) | 未激活的第二 state bank；无初态首块仅 [128,160) 暂存零 H0，按原 MTE3->V 保护 |
+| UB[192,208)/[208,224) | BF16 U/V_new input bank 0/1，各 16 KiB；多 head 普通路径用 bank0，单 head lookahead 按 chunk 奇偶轮转；V_new MTE3 完成后 WorkFree |
+| UB[224,226) | gate/scale/alpha，布局及 GateFree 生命周期沿用第 5/6 节 |
+
+最高保留地址仍为 226 KiB；不使用第二 state bank 也不回收其空间。
+关键独立性是 `right/D/H` 所在 UB[0,64) 与 V_new 所在 UB[192,224) 不相交。
+因此 right MTE3 完成后，即使 V_new MTE3 尚未结束，AIC 也可读取 GM right 并覆盖 D 区。
+V_new bank 的 WorkFree 和数据槽的 IoFree 仍在全部原写回之后，未提前释放 input bank。
+无初态首块的 H0 写回及其 MTE3->V 栅栏保持，不能用提前 RIGHT_READY 代替该栅栏。
+
+Stage1 仍一次 VF 产生原有 V_new/right。每 head、有效长度 n 的 V_new 和 right 各写
+`n*128*2` Byte 到原 GM 地址；完整块各 16 KiB。right 的 GM 索引仍为
+`vUpdateWorkspaceOffset/2 + (coreIdx*4+roundHead)*64*128`，由原 RIGHT_FREE 保护回绕。
+Stage2 仍从 GM 读取一次 right 到 L1，缓存策略保持；V_new 仍完整导出。所有路径的搬运
+次数、字节、MMAD/Fixpipe 次数均不变。L1 仍使用 W[0,64)、H/right[128,256)、kg[256,320)
+KiB，L0 ping/pong 及 320 KiB 的 L1 预留上界保持。
+
+### 10.3 同步顺序与闭环
+
+所有现有 event ID、flag ID、初值和每代 set/wait 次数保持。仅将选中路径的
+RIGHT_READY 从 RunStage1/ProcessSingleHeadPipeline 移到 ConsumeStage1Head：
+
+```text
+原输入就绪、P_READY -> Stage1 VF -> P_FREE（有 P 时）
+V_MTE3 WorkDone -> MTE3 wait WorkDone
+MTE3 写 GM right -> MTE3 发布 RIGHT_READY（每 head/需要 Stage2 的 chunk 恰好一次）
+MTE3 写 GM V_new -> 原 H0 写回/保护（仅需要时）-> WorkFree -> IoFree
+
+AIC: 原 RIGHT_READY wait -> GM right 读 L1 -> L1 读 L0 -> RIGHT_FREE
+     -> 原 MMAD/P_FREE 检查 -> D Fixpipe -> D_READY
+AIV: 原 D_READY wait -> Stage3 VF -> H MTE3 -> D_FREE/H_READY -> 原 IoFree
+下一 chunk: 仍等 RIGHT_FREE、H_READY 和原 local credit；work unit 尾仍 DONE/ACK 收口
+```
+
+当末 chunk 不保存 final_state 时 WRITE_RIGHT=false，不搬 right、不发布 RIGHT_READY；
+首块无初态跳过 P 时仍保留零 H0 保护。有一个有效 head 时空闲 AIV 不进入 Consume，
+不新增虚假通知。三个/四个 head 的两份 right 聚合发布完整保留，避免 D 覆盖未导出的 right。
+
+### 10.4 预算、规则检查与采用条件
+
+10/16 K32 case0 的七项均值 1610.88620 us，H 586.94120 us。2.7% 参考值为
+43.49393 us；若全部来自 H，需 H 降低 7.41%，平均每个 chunk 的 launch 关键路径缩短约
+0.24573 us。该值是所需改善，不是实测或理论保证。候选最多隐藏 V_new 写回与后继
+right 读取/第二次 GEMM/状态处理之间原先被顺序约束暴露的部分；同 pipe 搬运总量未减少，
+H 写回仍排在 V_new 后。当前没有这部分硬件 timeline 或可省时长下界，可能无可测收益。
+其价值是验证一条明确存在于源码的串行边，不能承诺约 2.7% 或任何固定收益。
+
+按 V2 检查本次差异：R02/R03/R08/R11/R13/R17 的依赖、容量和地址闭环满足上述静态约束；
+R10/R12/R14-R16/R18-R19 的搬运、VF 数、Stage 数保持；R21 不引入新运算，原公式、指数、
+输入值域和 BF16 舍入时机完全保持，候选数值风险只来自同步。R01/R04-R07/R09/R20 涉及的
+旧 head-owner 映射、驻留份数及连续分片已按实际代码列明，本轮不进行横切/grid-stride 迁移，
+不声称已完成整算子的 V2 结构迁移。设备证据缺项保持待验状态。
+
+正常入口和 Profile 入口共用本实现，不增加私有 probe 或运行开关。先通过原 CPU 标杆精度、
+MSS/确定性和共享调用回归，再以同环境 K32/B/K32、多个独立进程比较普通七项
+Task Duration 总和；H/right 交接改善只作归因证据。未显示稳定净收益时不采用，回退本轮
+Stage1 顺序及两个外层发布条件即可恢复 K32。详细执行条件记录在 validation.md。

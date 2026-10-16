@@ -1,4 +1,10 @@
-# Prepare K32 开发期验证记录
+# 当前实验：H right 优先交付（2026-10-16）
+
+当前分支 `codex/gdn-h-right-ready` 直接从 K32 创建。H Stage1 写回/通知顺序的本轮方案、
+追溯和设备验证计划见 [ChunkFwdH 验证记录](../../chunk_fwd_h/docs/validation.md)。
+以下保留已确认 K32 基线的历史记录，不能作为新 H 候选的精度或性能结果。
+
+## Prepare K32 历史开发期验证记录
 
 初始日期：2026-10-14；实测分析更新：2026-10-15。候选分支 `codex/gdn-prepare-k32`，从 `codex/gdn-profiling` / `809bce6887639e831caa856b8ac3a197a6a94294` 创建。方案见 [prepare_k32_design.md](prepare_k32_design.md)。当前完成候选设计、编码、离线检查、三轮B及三轮同日A的普通性能分析；用户报告本轮精度测试全部通过。case0七kernel合计均值相对同日A下降5.424%，达到≥5%均值目标；完整支持范围的ATK正式验收仍待完成。本记录保留至设备验收完成，届时按阶段05收敛结果至对应 ATK README。
 
