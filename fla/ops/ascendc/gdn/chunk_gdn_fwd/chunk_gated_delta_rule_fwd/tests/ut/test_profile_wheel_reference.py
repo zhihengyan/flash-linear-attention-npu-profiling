@@ -32,11 +32,11 @@ class WheelReferenceContract(unittest.TestCase):
             path.write_bytes(content)
         self.wheel = self.make_wheel("A.whl", self.payload)
 
-    def make_wheel(self, filename, payload):
+    def make_wheel(self, filename, payload, prefix=""):
         path = self.root / filename
         with zipfile.ZipFile(path, "w") as archive:
             for relative, content in payload.items():
-                archive.writestr("fla_npu/" + relative, content)
+                archive.writestr(prefix + "fla_npu/" + relative, content)
             archive.writestr("fla_npu-0.1.dist-info/METADATA", "Name: fla-npu\nVersion: 0.1\n")
         return path
 
@@ -83,11 +83,65 @@ class WheelReferenceContract(unittest.TestCase):
             collector.verify_installed_wheel(self.wheel, self.package)
 
     def test_incomplete_wheel_rejected(self):
-        for missing in (KERNEL, OPAPI):
-            with self.subTest(missing=missing):
-                payload = {name: value for name, value in self.payload.items() if name != missing}
-                wheel = self.make_wheel("incomplete.whl", payload)
-                with self.assertRaisesRegex(ValueError, "compiled kernel"):
+        for prefix in ("", "fla_npu-0.1.data/purelib/", "fla_npu-0.1.data/platlib/"):
+            for missing in (KERNEL, OPAPI):
+                with self.subTest(missing=missing, prefix=prefix):
+                    payload = {name: value for name, value in self.payload.items() if name != missing}
+                    wheel = self.make_wheel("incomplete.whl", payload, prefix)
+                    with self.assertRaisesRegex(ValueError, "compiled kernel") as failure:
+                        collector.verify_installed_wheel(wheel, self.package)
+                    detail = "kernel .o=0" if missing == KERNEL else "libcust_opapi.so=missing"
+                    self.assertIn(detail, str(failure.exception))
+
+    def test_data_schemes_match_installed_payload(self):
+        # setup.py forces root_is_pure=False; setuptools can stage all package
+        # files below .data/purelib even though pip installs to site-packages.
+        for scheme in ("purelib", "platlib"):
+            with self.subTest(scheme=scheme):
+                prefix = f"flash_linear_attention_npu_a5-26.10.0+dev123.data/{scheme}/"
+                wheel = self.make_wheel("data.whl", self.payload, prefix)
+                result = collector.verify_installed_wheel(wheel, self.package)
+                self.assertEqual(result["checked_files"], len(self.payload))
+                self.assertEqual(result["checked_kernel_objects"], 1)
+                self.assertEqual(result["sha256"], collector.file_sha256(wheel))
+
+    def test_data_scheme_kernel_mismatch_rejected(self):
+        for scheme in ("purelib", "platlib"):
+            with self.subTest(scheme=scheme):
+                payload = dict(self.payload, **{KERNEL: b"B kernel"})
+                wheel = self.make_wheel("wrong.whl", payload, f"fla_npu-0.1.data/{scheme}/")
+                with self.assertRaisesRegex(RuntimeError, "differs.*prepare.o"):
+                    collector.verify_installed_wheel(wheel, self.package)
+
+    def test_mixed_root_and_data_scheme_payload(self):
+        for scheme in ("purelib", "platlib"):
+            with self.subTest(scheme=scheme):
+                native = {name: value for name, value in self.payload.items() if name.startswith(VENDOR)}
+                python = {name: value for name, value in self.payload.items() if name not in native}
+                wheel = self.make_wheel("mixed.whl", python)
+                with zipfile.ZipFile(wheel, "a") as archive:
+                    for relative, content in native.items():
+                        archive.writestr(f"fla_npu-0.1.data/{scheme}/fla_npu/" + relative, content)
+                result = collector.verify_installed_wheel(wheel, self.package)
+                self.assertEqual(result["checked_files"], len(self.payload))
+
+    def test_install_path_collisions_between_layouts_rejected(self):
+        for first, second in (("", "fla_npu-0.1.data/purelib/"),
+                              ("", "fla_npu-0.1.data/platlib/"),
+                              ("fla_npu-0.1.data/purelib/", "fla_npu-0.1.data/platlib/")):
+            with self.subTest(first=first, second=second):
+                wheel = self.make_wheel("collision.whl", self.payload, first)
+                with zipfile.ZipFile(wheel, "a") as archive:
+                    archive.writestr(second + "fla_npu/" + KERNEL, self.payload[KERNEL])
+                with self.assertRaisesRegex(ValueError, "Duplicate runtime path"):
+                    collector.verify_installed_wheel(wheel, self.package)
+
+    def test_data_scheme_invalid_runtime_path_rejected(self):
+        for scheme in ("purelib", "platlib"):
+            with self.subTest(scheme=scheme):
+                payload = dict(self.payload, **{"../outside.so": b"invalid"})
+                wheel = self.make_wheel("invalid-data.whl", payload, f"fla_npu-0.1.data/{scheme}/")
+                with self.assertRaisesRegex(ValueError, "Invalid runtime path"):
                     collector.verify_installed_wheel(wheel, self.package)
 
     def test_invalid_or_duplicate_runtime_path_rejected(self):

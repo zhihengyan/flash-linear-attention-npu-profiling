@@ -89,6 +89,8 @@ python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --dev
 
 该参数改为逐文件 SHA256 校验安装内容与归档 wheel，覆盖 op_api、全部 kernel、配置/Python，拒绝缺失或额外原生文件；不指定时保留原 build-staging MD5 校验。metadata 记录 wheel SHA256及 `source_commit_role=profiling_checkout`，明确采集 checkout 和被测二进制身份。A/B 使用同一采集脚本，分别安装并指定对应 wheel，无需重编译；实际测量设备、输入/采样口径保持一致。新增10项归档校验测试通过，包含“同 host 库但不同 kernel”、混装/残留、错误归档及默认模式回归；连同原有检查共45项全部通过，`git diff --check` 通过。本机未运行真实 CANN/NPU 采集。
 
+同日后续报告 `Reference wheel must contain libcust_opapi.so and compiled kernel .o files`。检查发现移入的校验器仅识别根目录 `fla_npu/`，遗漏本仓 `setup.py` 的 `root_is_pure=False` 可生成的 `<dist>.data/purelib/fla_npu/`；`tests/test_wheel_environment.py` 已有该实际布局的构建验收证据。本地按此布局构造完整归档，复现同一异常；本轮按安装后路径映射 root/purelib/platlib，合并不冲突文件，拒绝归一化后的重复路径，并保留逐文件 hash/缺失/残留检查。补5项布局回归及扩展缺失项检查后，归档校验15项全部通过；真正缺少产物时，错误现包含识别数量/缺失项/归档路径样例。用户实际归档不在本机，尚无该文件及设备重跑结果；只需同步采集脚本再运行原命令，不要求重新编包。
+
 ---
 
 # K32 历史验证记录（以下不作为 N32 通过结论）

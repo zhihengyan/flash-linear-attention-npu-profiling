@@ -120,4 +120,6 @@ python torch_custom/fla_npu/test/test_aclnn_ctypes_abi.py NormOutputsTest --npu
 
 安装归档 A/B wheel 后，在同一采集分支追加 `--reference-wheel "$WHEEL_PATH"`，按指定 wheel 校验真实安装文件并记录 SHA256，避免与另一版本的 `build/` staging 比较；不用重新编译或跳过产物校验。该参数只校验，须先自行安装对应 wheel。2026-10-16，N32 分支从既有 `87431f0b` 移入此能力，10项无设备合同检查通过；普通 case、输入和采样配置未改。
 
+同日补充 root / `.data/purelib/` / `.data/platlib/` 归档成员到安装路径的映射，修复完整 wheel 被误报缺少 op_api/kernel 的情况；15项归档校验检查通过，仍拒绝内容不符、实际缺失和安装路径冲突。
+
 2026-10-12：计时源码接入后，14 项离线 timer/采集证据合同测试与 3 项既有 GDN 生产 wrapper 契约定向回归通过；原数学标杆、值域、比较阈值和 case JSON 未改动。当前 Windows 环境没有 CANN/NPU/torch，本轮未进行正式 ATK、Example/ST 或真实 profiling 验收，不能沿用本 README 历史设备结论作为本轮验证。设备待验项集中在 timer_report。

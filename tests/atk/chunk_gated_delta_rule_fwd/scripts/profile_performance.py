@@ -11,6 +11,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -133,9 +134,16 @@ def verify_installed_wheel(wheel, package_root):
         with zipfile.ZipFile(wheel) as archive:
             members = {}
             for info in archive.infolist():
-                if info.is_dir() or not info.filename.startswith("fla_npu/"):
+                if info.is_dir():
                     continue
-                relative = info.filename[len("fla_npu/"):]
+                # Match installed paths, as scripts/check_pypi_wheel.py does.
+                # setup.py can stage the package under .data/purelib; pip
+                # spreads both purelib and platlib back into site-packages.
+                relocated = re.fullmatch(r"[\w.+-]+\.data/(?:purelib|platlib)/(.+)", info.filename)
+                installed_name = relocated.group(1) if relocated else info.filename
+                if not installed_name.startswith("fla_npu/"):
+                    continue
+                relative = installed_name[len("fla_npu/"):]
                 parts = relative.split("/")
                 if "\\" in relative or ":" in relative or any(part in ("", ".", "..") for part in parts):
                     raise ValueError(f"Invalid runtime path in reference wheel: {info.filename}")
@@ -144,8 +152,16 @@ def verify_installed_wheel(wheel, package_root):
                 members[relative] = info
             kernels = [name for name in members
                        if name.startswith(vendor + "op_impl/ai_core/tbe/kernel/") and name.endswith(".o")]
-            if vendor + "op_api/lib/libcust_opapi.so" not in members or not kernels:
-                raise ValueError("Reference wheel must contain libcust_opapi.so and compiled kernel .o files")
+            has_opapi = vendor + "op_api/lib/libcust_opapi.so" in members
+            if not has_opapi or not kernels:
+                examples = [name for name in archive.namelist()
+                            if name.endswith("/libcust_opapi.so") or name.endswith(".o")][:5]
+                raise ValueError(
+                    "Reference wheel must contain libcust_opapi.so and compiled kernel .o files; "
+                    f"recognized fla_npu files={len(members)}, "
+                    f"libcust_opapi.so={'found' if has_opapi else 'missing'}, kernel .o={len(kernels)}; "
+                    f"archive artifact paths (up to 5): {examples}"
+                )
             metadata_names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
             if len(metadata_names) != 1:
                 raise ValueError("Reference wheel must contain exactly one distribution METADATA")
