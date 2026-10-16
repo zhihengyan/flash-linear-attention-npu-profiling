@@ -38,6 +38,17 @@ FLA_NPU_SOC=ascend950 FLA_NPU_OPS= python scripts/build_wheel.py
 python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --device 0
 ```
 
+默认预检将安装产物与当前目录的 `build/` staging 比较，适用于刚构建的 wheel。安装归档 K32、N32 或其它 A/B wheel 时，当前 `build/` 可能属于另一版本；此时在同一采集分支上指定刚安装的准确归档文件，无需切分支或重新构建：
+
+```bash
+python -m pip install --force-reinstall --no-cache-dir --no-deps "$WHEEL_PATH"
+python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --device 0 --reference-wheel "$WHEEL_PATH"
+```
+
+`--reference-wheel` 不执行安装；它逐文件比较已安装 `fla_npu` 与归档内容的 SHA256，含 op_api、kernel `.o`、配置和 Python 文件，同时拒绝缺失文件及额外残留的 `.so/.o`。因此无需让 K32 二进制匹配 N32 的 `build/`。不指定该参数时仍使用原 MD5 预检。该能力由既有 `87431f0b` 采集补丁移入 N32 分支（2026-10-16），只需同步采集脚本，不需要为此重新编译算子。
+
+归档模式下 `run_metadata.json` 记录 `artifact_check_mode=reference_wheel`、归档路径/SHA256/分发名/版本及校验文件数；`source_commit_role=profiling_checkout` 表示 `source_commit` 是采集脚本所在 checkout，不能用它推断已安装 kernel 的源码版本。A/B 固定同一份采集脚本、case、输入和设备条件，分别安装并指定对应 wheel，使用新的结果目录。
+
 默认执行原 `atk_chunk_gated_delta_rule_fwd_perf.json` 的 case 0/1；可用 `--cases 0` 或 `--cases 1` 选择。脚本按当前 wheel 路径注册 OPP，再检查 ATK/Python、npu-smi、安装产物和 Profile 符号，运行原 ATK performance_device。executor 仅在性能循环外保存该 case 的真实输入值与全部参数；随后同输入普通/诊断调用进行十项输出精确对照，导出 raw、CSV、layout/capture/run metadata 与日志。原 CPU/六 ACLNN 比较规则和性能统计不变。本入口是采集工具，完整精度/确定性/内存验收仍执行 ATK 原 all。
 
 默认结果在 `tests/atk/chunk_gated_delta_rule_fwd/atk_output/gdn_timer_<时间戳>_<随机标识>/`（仓库已忽略 atk_output）。也可用 `--output-dir` 指定一个尚不存在的目录。查看 run_metadata.json 的 status、原性能报告及实际成功用例，再看 timer/case_N 的 capture_metadata.json、timer_layout.json、gdn_npu_time_parsed.csv。采样 actual/sampled/truncated 字段给出每核每阶段计数；出现截断只能分析前 32 个调用。

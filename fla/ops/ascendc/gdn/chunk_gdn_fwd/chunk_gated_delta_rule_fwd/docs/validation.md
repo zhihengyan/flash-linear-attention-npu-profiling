@@ -77,7 +77,17 @@ for repeat in 1 2 3; do
 done
 ```
 
-普通采样配置保持原 ATK（历史每轮20组）；`--warmup` 默认5只控制诊断重放。保存每轮 `run_metadata.json`、普通 `op_summary.csv`，以及源码/安装 wheel 和 build MD5 对应关系。为测量波动补同条件 K32 对照时使用其匹配源码/build/wheel；原 A 已有同日三轮证据，无需为本次编码重复原 A。当前基线采集器无 `--reference-wheel` 等后续版本参数。
+普通采样配置保持原 ATK（历史每轮20组）；`--warmup` 默认5只控制诊断重放。保存每轮 `run_metadata.json`、普通 `op_summary.csv`，以及源码/安装 wheel 和产物校验对应关系；原 A 已有同日三轮证据，无需为本次编码重复原 A。
+
+2026-10-16，用户在 N32 checkout 安装归档 K32 wheel 后，原预检发现4个 Prepare `.o` 与当前 `build/` 不同而退出。这证明安装与 staging 二进制不同，不足以判定归档 K32 安装失败。N32 分支从较早 K32 创建，缺少后续 `87431f0b` 的归档采集能力；现将该补丁的采集脚本和10项合同测试移入，未合并其它 kernel/实验改动。
+
+在同一 N32 checkout 采归档 K32 对照时，先安装 K32，然后指定其准确文件：
+
+```bash
+python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_performance.py --device 0 --reference-wheel "$WHEEL_PATH"
+```
+
+该参数改为逐文件 SHA256 校验安装内容与归档 wheel，覆盖 op_api、全部 kernel、配置/Python，拒绝缺失或额外原生文件；不指定时保留原 build-staging MD5 校验。metadata 记录 wheel SHA256及 `source_commit_role=profiling_checkout`，明确采集 checkout 和被测二进制身份。A/B 使用同一采集脚本，分别安装并指定对应 wheel，无需重编译；实际测量设备、输入/采样口径保持一致。新增10项归档校验测试通过，包含“同 host 库但不同 kernel”、混装/残留、错误归档及默认模式回归；连同原有检查共45项全部通过，`git diff --check` 通过。本机未运行真实 CANN/NPU 采集。
 
 ---
 
