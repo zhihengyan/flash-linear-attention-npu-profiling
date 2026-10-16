@@ -100,6 +100,7 @@ public:
             l0ASlot_ = 0U;
             l0BSlot_ = 0U;
             l0CSlot_ = 0U;
+            qkCSlot_ = 0U;
         }
     }
 
@@ -125,15 +126,17 @@ public:
                     const int64_t firstHvInGroup = firstHvForHk < hvBase ? hvBase : firstHvForHk;
                     const uint32_t qkL1Slot = static_cast<uint32_t>(firstHvInGroup - hvBase);
                     const bool loadQK = hv == firstHvInGroup;
+                    const bool lastQKConsumer = headOffset + 1 == taskCount ||
+                        (hv + 1) / tiling_.hvPerHk != hk;
                     const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
                     const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
                     if (tiling_.stateVFirst != 0) {
                         ProcessStage2Head<true>(loc, hk, hv, ownerSubBlock, localSlot, qkL1Slot,
-                                                static_cast<uint32_t>(headOffset), loadQK,
+                                                static_cast<uint32_t>(headOffset), loadQK, lastQKConsumer,
                                                 stage5GroupPending && headOffset == 0);
                     } else {
                         ProcessStage2Head<false>(loc, hk, hv, ownerSubBlock, localSlot, qkL1Slot,
-                                                 static_cast<uint32_t>(headOffset), loadQK,
+                                                 static_cast<uint32_t>(headOffset), loadQK, lastQKConsumer,
                                                  stage5GroupPending && headOffset == 0);
                     }
                     if (headOffset == 0) {
@@ -273,8 +276,8 @@ private:
             auto tileL0C = GetTile(tensorL0C, tla::MakeCoord(0, 0), tla::MakeShape(kBt, kV));
             CopyL1ToL0A{}(tileL0A, tileL1APrime);
             CopyL1ToL0B{}(tileL0B, tileL1V);
-            SetFlag<HardEvent::MTE1_M>(avCSlot);
-            WaitFlag<HardEvent::MTE1_M>(avCSlot);
+            SetFlag<HardEvent::MTE1_M>(avASlot);
+            WaitFlag<HardEvent::MTE1_M>(avASlot);
             {
                 GDN_TIMER_SCOPE(timer_, O_ATTN_V);
                 TileMmad{}(tileL0C, tileL0A, tileL0B, kBt, kV, kBt, true, 0);
@@ -292,8 +295,8 @@ private:
             auto tileL0B = GetTile(tensorL0B, tla::MakeCoord(0, 0), tla::MakeShape(mActual, kV));
             CopyL1ToL0A{}(tileL0A, tileL1APrime);
             CopyL1ToL0B{}(tileL0B, tileL1V);
-            SetFlag<HardEvent::MTE1_M>(avCSlot);
-            WaitFlag<HardEvent::MTE1_M>(avCSlot);
+            SetFlag<HardEvent::MTE1_M>(avASlot);
+            WaitFlag<HardEvent::MTE1_M>(avASlot);
             {
                 GDN_TIMER_SCOPE(timer_, O_ATTN_V);
                 TileMmad{}(tensorL0C, tensorL0A, tensorL0B, true, 0);
@@ -326,7 +329,7 @@ private:
     __aicore__ inline void ProcessStage2Head(const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv,
                                              uint32_t ownerSubBlock, uint32_t localSlot,
                                              uint32_t qkL1Slot, uint32_t hL1Slot, bool loadQK,
-                                             bool waitPreviousStage5)
+                                             bool lastQKConsumer, bool waitPreviousStage5)
     {
         using HLayout = std::conditional_t<StateVFirst, LayoutCM, LayoutRM>;
         using TileCopyQH = Catlass::Gemm::Tile::PackedTileCopyTla<ArchTag, Element, LayoutRM, Element, HLayout,
@@ -392,60 +395,69 @@ private:
             WaitFlag<HardEvent::MTE2_MTE1>(qkEvent);
         }
 
-        // Move Q/K from L1 to L0 and launch Q @ K^T.
-        const uint32_t qktASlot = l0ASlot_;
-        const uint32_t qktBSlot = l0BSlot_;
-        const uint32_t qktCSlot = l0CSlot_;
-        l0ASlot_ ^= 1U;
-        l0BSlot_ ^= 1U;
-        l0CSlot_ ^= 1U;
-        using LayoutTagQkL1A = typename TileCopyQK::LayoutTagL1A;
-        using LayoutTagQkL1B = typename TileCopyQK::LayoutTagL1B;
-        using LayoutTagQkL0A = typename TileCopyQK::LayoutTagL0A;
-        using LayoutTagQkL0B = typename TileCopyQK::LayoutTagL0B;
-        using CopyQkL1ToL0A = typename TileCopyQK::CopyL1ToL0A;
-        using CopyQkL1ToL0B = typename TileCopyQK::CopyL1ToL0B;
-        using QkTileMmad = Catlass::Gemm::Tile::TileMmadTla<ArchTag, Element, LayoutTagQkL1A>;
         LocalTensor<Element> l1Q =
             resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1QOffset(qkL1Slot));
-        LocalTensor<Element> l1K =
-            resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1KOffset(qkL1Slot));
-        LocalTensor<Element> qktL0A =
-            resource_.l0ABuf.template GetBufferByByte<Element>(ChunkFwdOL0AOffset(qktASlot));
-        LocalTensor<Element> qktL0B =
-            resource_.l0BBuf.template GetBufferByByte<Element>(ChunkFwdOL0BOffset(qktBSlot));
+        if (loadQK) {
+            // Pin this FP32 result until every HEAD in the current HK subgroup
+            // has copied it. The other L0C slot remains available for Q @ H.
+            const uint32_t qktASlot = l0ASlot_;
+            const uint32_t qktBSlot = l0BSlot_;
+            const uint32_t qktCSlot = l0CSlot_;
+            qkCSlot_ = qktCSlot;
+            l0ASlot_ ^= 1U;
+            l0BSlot_ ^= 1U;
+            l0CSlot_ ^= 1U;
+            using LayoutTagQkL1A = typename TileCopyQK::LayoutTagL1A;
+            using LayoutTagQkL1B = typename TileCopyQK::LayoutTagL1B;
+            using LayoutTagQkL0A = typename TileCopyQK::LayoutTagL0A;
+            using LayoutTagQkL0B = typename TileCopyQK::LayoutTagL0B;
+            using CopyQkL1ToL0A = typename TileCopyQK::CopyL1ToL0A;
+            using CopyQkL1ToL0B = typename TileCopyQK::CopyL1ToL0B;
+            using QkTileMmad = Catlass::Gemm::Tile::TileMmadTla<ArchTag, Element, LayoutTagQkL1A>;
+            LocalTensor<Element> l1K =
+                resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1KOffset(qkL1Slot));
+            LocalTensor<Element> qktL0A =
+                resource_.l0ABuf.template GetBufferByByte<Element>(ChunkFwdOL0AOffset(qktASlot));
+            LocalTensor<Element> qktL0B =
+                resource_.l0BBuf.template GetBufferByByte<Element>(ChunkFwdOL0BOffset(qktBSlot));
+            LocalTensor<float> qktL0C =
+                resource_.l0CBuf.template GetBufferByByte<float>(ChunkFwdOL0COffset(qktCSlot));
+            auto layoutL1Q = tla::MakeLayout<Element, LayoutTagQkL1A>(m, kK);
+            auto layoutL1K = tla::MakeLayout<Element, LayoutTagQkL1B>(kK, m);
+            auto layoutQktL0A = tla::MakeLayout<Element, LayoutTagQkL0A>(m, kK);
+            auto layoutQktL0B = tla::MakeLayout<Element, LayoutTagQkL0B>(kK, m);
+            auto layoutQktL0C = tla::MakeLayoutL0C(m, m);
+            auto tensorL1Q = tla::MakeTensor(l1Q, layoutL1Q, Catlass::Arch::PositionL1{});
+            auto tensorL1K = tla::MakeTensor(l1K, layoutL1K, Catlass::Arch::PositionL1{});
+            auto tensorQktL0A = tla::MakeTensor(qktL0A, layoutQktL0A, Catlass::Arch::PositionL0A{});
+            auto tensorQktL0B = tla::MakeTensor(qktL0B, layoutQktL0B, Catlass::Arch::PositionL0B{});
+            auto tensorQktL0C = tla::MakeTensor(qktL0C, layoutQktL0C, Catlass::Arch::PositionL0C{});
+            auto tileL1Q = GetTile(tensorL1Q, tla::MakeCoord(0, 0), tla::MakeShape(m, kK));
+            auto tileL1K = GetTile(tensorL1K, tla::MakeCoord(0, 0), tla::MakeShape(kK, m));
+            auto tileQktL0A = GetTile(tensorQktL0A, tla::MakeCoord(0, 0), tla::MakeShape(m, kK));
+            auto tileQktL0B = GetTile(tensorQktL0B, tla::MakeCoord(0, 0), tla::MakeShape(kK, m));
+            auto tileQktL0C = GetTile(tensorQktL0C, tla::MakeCoord(0, 0), tla::MakeShape(m, m));
+            WaitFlag<HardEvent::M_MTE1>(L0AEvent(qktASlot));
+            WaitFlag<HardEvent::M_MTE1>(L0BEvent(qktBSlot));
+            WaitFlag<HardEvent::FIX_M>(qktCSlot);
+            CopyQkL1ToL0A{}(tileQktL0A, tileL1Q);
+            CopyQkL1ToL0B{}(tileQktL0B, tileL1K);
+            SetFlag<HardEvent::MTE1_M>(qktASlot);
+            WaitFlag<HardEvent::MTE1_M>(qktASlot);
+            {
+                GDN_TIMER_SCOPE(timer_, O_QK);
+                QkTileMmad{}(tileQktL0C, tileQktL0A, tileQktL0B, m, m, kK, true, 0);
+            }
+            SetFlag<HardEvent::M_MTE1>(L0AEvent(qktASlot));
+            SetFlag<HardEvent::M_MTE1>(L0BEvent(qktBSlot));
+            SetFlag<HardEvent::M_FIX>(qktCSlot);
+            WaitFlag<HardEvent::M_FIX>(qktCSlot);
+        }
+
+        // Every HEAD still receives its own raw FP32 UB copy before gate/mask.
+        const uint32_t qktCSlot = qkCSlot_;
         LocalTensor<float> qktL0C =
             resource_.l0CBuf.template GetBufferByByte<float>(ChunkFwdOL0COffset(qktCSlot));
-        auto layoutL1Q = tla::MakeLayout<Element, LayoutTagQkL1A>(m, kK);
-        auto layoutL1K = tla::MakeLayout<Element, LayoutTagQkL1B>(kK, m);
-        auto layoutQktL0A = tla::MakeLayout<Element, LayoutTagQkL0A>(m, kK);
-        auto layoutQktL0B = tla::MakeLayout<Element, LayoutTagQkL0B>(kK, m);
-        auto layoutQktL0C = tla::MakeLayoutL0C(m, m);
-        auto tensorL1Q = tla::MakeTensor(l1Q, layoutL1Q, Catlass::Arch::PositionL1{});
-        auto tensorL1K = tla::MakeTensor(l1K, layoutL1K, Catlass::Arch::PositionL1{});
-        auto tensorQktL0A = tla::MakeTensor(qktL0A, layoutQktL0A, Catlass::Arch::PositionL0A{});
-        auto tensorQktL0B = tla::MakeTensor(qktL0B, layoutQktL0B, Catlass::Arch::PositionL0B{});
-        auto tensorQktL0C = tla::MakeTensor(qktL0C, layoutQktL0C, Catlass::Arch::PositionL0C{});
-        auto tileL1Q = GetTile(tensorL1Q, tla::MakeCoord(0, 0), tla::MakeShape(m, kK));
-        auto tileL1K = GetTile(tensorL1K, tla::MakeCoord(0, 0), tla::MakeShape(kK, m));
-        auto tileQktL0A = GetTile(tensorQktL0A, tla::MakeCoord(0, 0), tla::MakeShape(m, kK));
-        auto tileQktL0B = GetTile(tensorQktL0B, tla::MakeCoord(0, 0), tla::MakeShape(kK, m));
-        auto tileQktL0C = GetTile(tensorQktL0C, tla::MakeCoord(0, 0), tla::MakeShape(m, m));
-        WaitFlag<HardEvent::M_MTE1>(L0AEvent(qktASlot));
-        WaitFlag<HardEvent::M_MTE1>(L0BEvent(qktBSlot));
-        WaitFlag<HardEvent::FIX_M>(qktCSlot);
-        CopyQkL1ToL0A{}(tileQktL0A, tileL1Q);
-        CopyQkL1ToL0B{}(tileQktL0B, tileL1K);
-        SetFlag<HardEvent::MTE1_M>(qktCSlot);
-        WaitFlag<HardEvent::MTE1_M>(qktCSlot);
-        {
-            GDN_TIMER_SCOPE(timer_, O_QK);
-            QkTileMmad{}(tileQktL0C, tileQktL0A, tileQktL0B, m, m, kK, true, 0);
-        }
-        SetFlag<HardEvent::M_MTE1>(L0AEvent(qktASlot));
-        SetFlag<HardEvent::M_MTE1>(L0BEvent(qktBSlot));
-
-        // Publish Q @ K^T from L0C to the owner AIV's A_raw UB slot.
         auto qktLayout = tla::MakeLayoutL0C(m, m);
         auto qktTensor = tla::MakeTensor(qktL0C, qktLayout, Catlass::Arch::PositionL0C{});
         auto qktTile = GetTile(qktTensor, tla::MakeCoord(0, 0), tla::MakeShape(m, m));
@@ -455,19 +467,19 @@ private:
             Catlass::Arch::PositionUB{});
         using CopyQktToUb = typename DirectTileCopyCC::template CopyL0CToDst<decltype(tensorARawUb)>;
         CopyQktToUb copyQktToUb;
-        SetFlag<HardEvent::M_FIX>(qktCSlot);
-        WaitFlag<HardEvent::M_FIX>(qktCSlot);
         copyQktToUb(tensorARawUb, qktTile, static_cast<uint8_t>(ownerSubBlock), 0);
-        SetFlag<HardEvent::FIX_M>(qktCSlot);
+        if (lastQKConsumer) {
+            SetFlag<HardEvent::FIX_M>(qktCSlot);
+        }
         WaitFlag<HardEvent::MTE2_MTE1>(hEvent);
 
         // Move Q/H from L1 to L0 and compute Q @ H.
         const uint32_t qhASlot = l0ASlot_;
         const uint32_t qhBSlot = l0BSlot_;
-        const uint32_t qhCSlot = l0CSlot_;
+        const uint32_t qhCSlot = qkCSlot_ ^ 1U;
         l0ASlot_ ^= 1U;
         l0BSlot_ ^= 1U;
-        l0CSlot_ ^= 1U;
+        l0CSlot_ = qhCSlot ^ 1U;
         using LayoutTagQhL1A = typename TileCopyQH::LayoutTagL1A;
         using LayoutTagQhL1B = typename TileCopyQH::LayoutTagL1B;
         using LayoutTagQhL0A = typename TileCopyQH::LayoutTagL0A;
@@ -501,8 +513,10 @@ private:
         WaitFlag<HardEvent::FIX_M>(qhCSlot);
         CopyQhL1ToL0A{}(tileQhL0A, tileQhL1Q);
         CopyQhL1ToL0B{}(tileQhL0B, tileQhL1H);
-        SetFlag<HardEvent::MTE1_M>(qhCSlot);
-        WaitFlag<HardEvent::MTE1_M>(qhCSlot);
+        // QH can reuse one C slot while A/B ping-pong. Tie this notification
+        // to A's M_MTE1 credit, so the same event cannot be set twice early.
+        SetFlag<HardEvent::MTE1_M>(qhASlot);
+        WaitFlag<HardEvent::MTE1_M>(qhASlot);
         SetFlag<HardEvent::MTE1_MTE2>(hEvent);
         {
             GDN_TIMER_SCOPE(timer_, O_QH);
@@ -528,7 +542,7 @@ private:
         copyQhToUb(tensorOSRawUb, qhTile, static_cast<uint8_t>(ownerSubBlock), 0);
         SetFlag<HardEvent::FIX_M>(qhCSlot);
 
-        if (loadQK) {
+        if (lastQKConsumer) {
             SetFlag<HardEvent::MTE1_MTE2>(qkEvent);
         }
 
@@ -554,6 +568,7 @@ private:
     uint32_t l0ASlot_ = 0U;
     uint32_t l0BSlot_ = 0U;
     uint32_t l0CSlot_ = 0U;
+    uint32_t qkCSlot_ = 0U;
 
 private:
     GdnKernelTimer *timer_ = nullptr;

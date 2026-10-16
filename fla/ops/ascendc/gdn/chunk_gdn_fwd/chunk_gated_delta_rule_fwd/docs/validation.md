@@ -1,4 +1,11 @@
-# Prepare K32 开发期验证记录
+# 当前实验：O raw QK 共享（2026-10-16）
+
+当前分支 `codex/gdn-o-shared-qk` 直接基于 K32；只消除 O Stage2 同一 group/hk 的重复
+raw QK，保留各 head 独立的 gate、QH、AV 与输出。详设和本轮待设备验证项见
+[ChunkFwdO 验证记录](../../chunk_fwd_o/docs/validation.md)。
+以下 K32 结果只作为历史基线，不代表 O 候选已通过精度或取得收益。
+
+## Prepare K32 历史开发期验证记录
 
 初始日期：2026-10-14；实测分析更新：2026-10-15。候选分支 `codex/gdn-prepare-k32`，从 `codex/gdn-profiling` / `809bce6887639e831caa856b8ac3a197a6a94294` 创建。方案见 [prepare_k32_design.md](prepare_k32_design.md)。当前完成候选设计、编码、离线检查、三轮B及三轮同日A的普通性能分析；用户报告本轮精度测试全部通过。case0七kernel合计均值相对同日A下降5.424%，达到≥5%均值目标；完整支持范围的ATK正式验收仍待完成。本记录保留至设备验收完成，届时按阶段05收敛结果至对应 ATK README。
 

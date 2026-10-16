@@ -1,5 +1,9 @@
 # GDN 原始流程与计时方案
 
+2026-10-16 O raw QK 共享分支更新现有 O scope 的行号，不新增打点。O_QK 的实际调用轴
+改为每 group/hk 首 consumer，而 O_QH 和 raw Fixpipe 分发仍逐 head；同步调整与验证边界
+见 [O 设计](../../chunk_fwd_o/docs/design.md)。下文原插桩的“同步不变”结论不覆盖此业务优化。
+
 基线：main 分支 `90176b44321ebdbf3ae2a9057243157d7085c6e1`。本次仅增加诊断计时；公式、task 划分、原有 event/flag、工作区和输出数值沿用基线。公开算子入口为 ChunkGatedDeltaRuleFwd；其内部覆盖 Arch22/Arch35 Phase6 和 A5 Prepare/H/O 两条路径。
 
 ## 改造前执行流程
@@ -103,14 +107,14 @@ ACLNN launch（host，固定） → stream 同步（采集端，位于性能循�
 | H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_vec.h:1200` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(` | AIV | 原 wait 返回；等待窗口 |
 | H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_vec.h:1217` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(` | AIV | 原 wait 返回；等待窗口 |
 | H_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_h/op_kernel/arch35/chunk_fwd_h_vec.h:1233` | `AscendC::CrossCoreWaitFlag<0x4, PIPE_S>(FwdHAivLocalFlag(FWD_H_ROUND_ACK_FLAG, 0));` | AIV | 原 wait 返回；等待窗口 |
-| O_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:170` | `Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);` | AIC | 原 wait 返回；等待窗口 |
-| O_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:182` | `Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);` | AIC | 原 wait 返回；等待窗口 |
-| O_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:195` | `Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);` | AIC | 原 wait 返回；等待窗口 |
-| O_ATTN_V | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:279` | `TileMmad{}(tileL0C, tileL0A, tileL0B, kBt, kV, kBt, true, 0);` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
-| O_ATTN_V | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:298` | `TileMmad{}(tensorL0C, tensorL0A, tensorL0B, true, 0);` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
-| O_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:386` | `Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);` | AIC | 原 wait 返回；等待窗口 |
-| O_QK | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:442` | `QkTileMmad{}(tileQktL0C, tileQktL0A, tileQktL0B, m, m, kK, true, 0);` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
-| O_QH | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:508` | `QhTileMmad{}(tileQhL0C, tileQhL0A, tileQhL0B, m, kV, kK, true, 0);` | AIC | NoBarrier 调用/下发窗口；原同步保留 |
+| O_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:173` | `Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);` | AIC | 原 wait 返回；等待窗口 |
+| O_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:185` | `Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);` | AIC | 原 wait 返回；等待窗口 |
+| O_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:198` | `Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);` | AIC | 原 wait 返回；等待窗口 |
+| O_ATTN_V | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:282` | `TileMmad{}(tileL0C, tileL0A, tileL0B, kBt, kV, kBt, true, 0);` | AIC | NoBarrier 调用/下发窗口；同步见 O 设计 |
+| O_ATTN_V | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:301` | `TileMmad{}(tensorL0C, tensorL0A, tensorL0B, true, 0);` | AIC | NoBarrier 调用/下发窗口；同步见 O 设计 |
+| O_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:389` | `Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);` | AIC | 原 wait 返回；等待窗口 |
+| O_QK | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:448` | `QkTileMmad{}(tileQktL0C, tileQktL0A, tileQktL0B, m, m, kK, true, 0);` | AIC | NoBarrier 调用/下发窗口；同步见 O 设计 |
+| O_QH | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_cube.h:522` | `QhTileMmad{}(tileQhL0C, tileQhL0A, tileQhL0B, m, kV, kK, true, 0);` | AIC | NoBarrier 调用/下发窗口；同步见 O 设计 |
 | O_WAIT | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_vector.h:333` | `Catlass::Arch::CrossCoreWaitFlag(cubeToVecFlag_);` | AIV | 原 wait 返回；等待窗口 |
 | O_MASK | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_vector.h:339` | `AscendC::VF_CALL<Stage3Gate64VF<true>>(` | AIV | NoBarrier 调用/下发窗口；原同步保留 |
 | O_MASK | `fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel/arch35/chunk_fwd_o_vector.h:350` | `AscendC::VF_CALL<Stage3Gate64VF<false>>(` | AIV | NoBarrier 调用/下发窗口；原同步保留 |
