@@ -544,11 +544,12 @@ public:
 
     __aicore__ inline void Stage4_AccIssue(int64_t taskIdx)
     {
-        const int32_t bt = static_cast<int32_t>(chunkSize);
         const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
         WaitFlag<HardEvent::M_MTE1>(bank);
-        MatmulToL0C<float>(l1LeafLeft[taskIdx], l1NegL[taskIdx], l0AfP[bank], l0BfP[bank], l0CTask[taskIdx], bt, bt, bt,
-                           false, true, true, bank);
+        // Left has nonzero logical columns only in K=[32,64).
+        // Its transposed L1 leaf and -L both select physical source rows.
+        SolveHalfKMatmulToL0C<true, true>(l1LeafLeft[taskIdx], l1NegL[taskIdx], l0AfP[bank], l0BfP[bank],
+                                          l0CTask[taskIdx], false, bank);
         SetFlag<HardEvent::M_FIX>(bank);
         SetFlag<HardEvent::M_MTE1>(bank);
     }
@@ -570,18 +571,18 @@ public:
     // A = LeafLeft + Y @ LeafRight. tmp = I @ LeafLeft (init) then
     // Y @ LeafRight accumulate. Intra-task second Load uses L0 [32,48)/[48,64)
     // so MTE1 overlaps the first Cube M. Dump stays per-task after both MMADs.
+    // Left has only K=[32,64) rows; Right has only K=[0,32) rows.
     // Full chunk + outputA: L0C→gmA (valid M rows) then Nd2Nz back to L1.
     // Tail or outputA=0: L0C→L1 NZ directly (padding rows stay in L0C).
     __aicore__ inline void Stage5_Compute(int64_t taskIdx)
     {
-        const int32_t bt = static_cast<int32_t>(chunkSize);
         const uint8_t bank = static_cast<uint8_t>(taskIdx & 1);
         WaitFlag<HardEvent::M_MTE1>(bank);
-        MatmulToL0C<float>(l1I, l1LeafLeft[taskIdx], l0Af[bank], l0Bf[bank], l0CTask[taskIdx], bt, bt, bt, true, false,
-                           false, bank);
+        SolveHalfKMatmulToL0C<false, true>(l1I, l1LeafLeft[taskIdx], l0Af[bank], l0Bf[bank],
+                                           l0CTask[taskIdx], true, bank);
         SetFlag<HardEvent::FIX_M>(bank);
-        MatmulToL0C<float>(l1Y[taskIdx], l1LeafRight[taskIdx], l0AfP[bank], l0BfP[bank], l0CTask[taskIdx], bt, bt, bt,
-                           false, false, false, bank);
+        SolveHalfKMatmulToL0C<false, false>(l1Y[taskIdx], l1LeafRight[taskIdx], l0AfP[bank], l0BfP[bank],
+                                            l0CTask[taskIdx], false, bank);
         SetFlag<HardEvent::M_FIX>(bank);
         SetFlag<HardEvent::M_MTE1>(bank);
     }
