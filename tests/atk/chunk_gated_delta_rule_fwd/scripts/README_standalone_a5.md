@@ -68,8 +68,9 @@ ATK 运行时。精度标杆直接复用上级目录仅依赖 PyTorch 的 `gdn_r
 - 直接读取 JSON 的 q/k/v/g/beta shape、dtype、范围、scale、chunk_size 和序列元数据。
   QKV 使用 BNSD，g/beta 使用 `[B,T,Hv]`。随机数在 CPU FP32 中均匀生成后转换到指定 dtype。
   这会保留 JSON 值域，但不保证与 ATK 内部随机数生成器逐元素一致。
-- q/k/v 范围为 `[-0.05,0.05]`；g/beta 范围为 `[-1,1]`。
+- q/k/v 范围为 `[-0.05,0.05]`；g 范围为 `[-1,0]`；beta 范围为 `[-1,1]`。
   不额外归一化 q/k，也不对 g/beta 做 sigmoid、log、截断或值域收缩。
+  两个入口共用的 JSON 解析会拒绝超出 `[-1,0]` 的 g 值域，避免误用旧 JSON 中的正门控范围。
 - 沿用 CPU 标杆的确定性初态：`state_initial_final`、`state_initial_only` 使用非零 FP32 初态；
   `state_zero_final` 使用零 FP32 初态；`dense`、`varlen` 不传初态。
 - 按原 executor 设置输出最终状态的场景；生成 canonical chunk indices；变长序列各自重置状态。
@@ -139,11 +140,37 @@ ATK 运行时。精度标杆直接复用上级目录仅依赖 PyTorch 的 `gdn_r
    `--save none` 关闭。用例不通过返回码为 1，全部通过为 0。运行异常会保留错误报告并停止，
    设备错误后请在新进程重跑。
 
+   `print(d.keys())` 只打印顶层字段名，并不展开张量。可以先查看报告中的失败条目：
+
    ```bash
-   python -c "import torch; d=torch.load('output/gdn_accuracy_smoke/case_0_seed_20260827.pt', map_location='cpu', weights_only=False); print(d.keys())"
+   python - <<'PY'
+   import json
+   from pprint import pprint
+   with open('output/gdn_accuracy_scenarios/accuracy.json', encoding='utf-8') as f:
+       report = json.load(f)
+   for row in report['results']:
+       if row['case']['id'] == 400:
+           pprint(row)
+   PY
    ```
 
-   上述文件只有在该 case 失败或使用 `--save all` 时存在。重新运行请指定新的 output-dir，
+   然后使用失败条目 `dump` 指定的实际文件名离线检查。默认种子规则下，case 400 对应
+   `20260827 + 400 = 20261227`，文件名为 `case_400_seed_20261227.pt`：
+
+   ```bash
+   python tests/atk/chunk_gated_delta_rule_fwd/scripts/accuracy_a5.py \
+     --inspect-dump output/gdn_accuracy_scenarios/case_400_seed_20261227.pt \
+     --rtol 0.02 --atol 1e-6 --topk 10
+   ```
+
+   此模式仅需 CPU PyTorch，不调用 NPU 或 ATK，兼容此前保存的 dump。输出输入与结果的
+   shape/dtype/值域、前 8 个元素、原始比较报告（新 dump 内置，旧 dump 从同目录报告读取）、
+   各输出误差，以及最多 topk 个失败坐标的 DUT/golden/绝对误差/允许误差。
+   `final_state` 还按逻辑序列分别统计，便于检查变长序列重置和尾序列问题；坐标顺序为
+   `[sequence,Hv,K,V]`。输出 `None` 说明异常发生前尚未获取该组数据，需查看报告中的 `error`。
+   检查时沿用失败运行的实际容差，上述值仍仅为演示值。
+
+   dump 只有在该 case 失败或使用 `--save all` 时存在。重新运行请指定新的 output-dir，
    避免旧 dump 与本轮报告混淆。输出比较异常前尚未取得的数据无法保存；错误信息见报告。
 
 ## 3. msopprof 性能测试

@@ -66,6 +66,8 @@ def read_cases(path):
             bounds = spec["range_values"]
             if len(bounds) != 2 or not all(math.isfinite(x) for x in bounds) or bounds[0] > bounds[1]:
                 raise ValueError(f"case {case_id}: invalid {name} range")
+            if name == "g" and not (-1 <= bounds[0] <= bounds[1] <= 0):
+                raise ValueError(f"case {case_id}: g range must stay within [-1, 0], got {bounds}")
             if spec.get("outlier_values"):
                 raise ValueError("outlier sampling is not supported by this runner")
         for name in ("g", "beta"):
@@ -300,23 +302,116 @@ def compare_output(name, actual, expected, case, rtol, atol):
     }
 
 
+def inspect_dump(path, rtol, atol, topk):
+    """Inspect an existing CPU dump without importing torch_npu or rerunning GDN."""
+    torch, reference = numerical_modules()
+    data = torch.load(path, map_location="cpu", weights_only=False)
+    description = data["case"]
+    attrs, shapes = description["attributes"], description["shapes"]
+    b, hk, tokens, key_dim = shapes["q"]
+    _, hv, _, value_dim = shapes["v"]
+    cu = (tuple(int(x) for x in attrs["cu_seqlens_spec"].split(","))
+          if attrs["is_varlen"] else None)
+    case = reference.GdnCase(b, hk, hv, tokens, key_dim, value_dim,
+                             attrs["chunk_size"], attrs["scale"], attrs["scenario"], cu)
+    case.validate()
+    print(json.dumps({"dump": str(Path(path).resolve()), "case": description,
+                      "seed": data["seed"], "rtol": rtol, "atol": atol}, indent=2))
+    saved = data.get("comparison")
+    report_path = Path(path).parent / "accuracy.json"
+    if saved is None and report_path.is_file():
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        saved = next((row for row in report.get("results", [])
+                      if row["case"]["id"] == description["id"] and row["seed"] == data["seed"]), None)
+    if saved is not None:
+        print("saved_comparison=" + json.dumps(saved, ensure_ascii=False))
+
+    def tensor_summary(tensor):
+        flat = tensor.detach().cpu().reshape(-1)
+        finite = torch.isfinite(flat)
+        values = flat[finite].double()
+        return {
+            "shape": list(tensor.shape), "dtype": str(tensor.dtype),
+            "nonfinite": int((~finite).sum()),
+            "min": float(values.min()) if values.numel() else None,
+            "max": float(values.max()) if values.numel() else None,
+            "preview": flat[:8].tolist(),
+        }
+
+    for group in ("inputs", "dut", "golden"):
+        tensors = data.get(group)
+        if tensors is None:
+            print(f"{group}=None (not collected before the failure)")
+            continue
+        for name, tensor in tensors.items():
+            print(f"{group}.{name}=" + json.dumps(tensor_summary(tensor)))
+    state = data.get("initial_state")
+    print("initial_state=" + ("None" if state is None else json.dumps(tensor_summary(state))))
+    actual, expected = data.get("dut"), data.get("golden")
+    if actual is None or expected is None:
+        print("Comparison unavailable: inspect the saved error or accuracy.json.")
+        return 1
+    for name in reference.output_names(case):
+        metrics = compare_output(name, actual[name], expected[name], case, rtol, atol)
+        print(f"comparison.{name}=" + json.dumps(metrics))
+        if actual[name].shape != expected[name].shape:
+            continue
+        if name == "final_state":
+            for sequence in range(case.sequence_count):
+                start, end = (cu[sequence:sequence + 2] if cu is not None else (0, tokens))
+                sequence_metrics = compare_output(name, actual[name][sequence], expected[name][sequence],
+                                                  case, rtol, atol)
+                print(f"final_state.sequence_{sequence}=" + json.dumps({
+                    "token_begin": start, "token_end": end, "length": end - start,
+                    **sequence_metrics,
+                }))
+        a, e = actual[name].double(), expected[name].double()
+        valid = torch.ones_like(e, dtype=torch.bool)
+        if name == "A":
+            valid.zero_()
+            for batch, _, begin, end in reference.chunk_ranges(case):
+                valid[batch, :, begin:end, :end - begin] = True
+        error = (a - e).abs()
+        limit = atol + rtol * e.abs()
+        bad = valid & ((error > limit) | ~torch.isfinite(a) | ~torch.isfinite(e))
+        indices = bad.reshape(-1).nonzero(as_tuple=False)[:topk].reshape(-1).tolist()
+        for flat_index in indices:
+            remainder, coordinates = flat_index, []
+            for size in reversed(e.shape):
+                coordinates.append(remainder % size)
+                remainder //= size
+            index = tuple(reversed(coordinates))
+            print(f"mismatch.{name}=" + json.dumps({
+                "index": list(index), "dut": float(a[index]), "golden": float(e[index]),
+                "abs_error": float(error[index]), "allowed_error": float(limit[index]),
+            }))
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     add_case_arguments(parser, ACCURACY_JSON)
     parser.add_argument("--rtol", type=float, help="required, explicitly chosen mixed tolerance")
     parser.add_argument("--atol", type=float, help="required, explicitly chosen mixed tolerance")
+    parser.add_argument("--inspect-dump", type=Path, help="inspect a saved .pt file on CPU; no NPU needed")
+    parser.add_argument("--topk", type=int, default=10, help="first mismatched coordinates per output when inspecting")
     parser.add_argument("--seed-count", type=int, default=1)
     parser.add_argument("--cpu-threads", type=int, default=1)
     parser.add_argument("--output-dir", type=Path, default=CASE_DIR / "runs" / "standalone_accuracy")
     parser.add_argument("--save", choices=("failed", "all", "none"), default="failed")
     args = parser.parse_args(argv)
+    if args.inspect_dump is not None or not args.list_cases:
+        if any(x is None or not math.isfinite(x) or x < 0 for x in (args.rtol, args.atol)):
+            parser.error("supply finite, nonnegative --rtol and --atol; ATK ratios cannot be converted to these")
+    if args.inspect_dump is not None:
+        if args.topk < 1:
+            parser.error("--topk must be positive")
+        return inspect_dump(args.inspect_dump, args.rtol, args.atol, args.topk)
     records = select_cases(args)
     if args.list_cases:
         for record in records:
             print(json.dumps(case_description(record), ensure_ascii=False))
         return 0
-    if any(x is None or not math.isfinite(x) or x < 0 for x in (args.rtol, args.atol)):
-        parser.error("supply finite, nonnegative --rtol and --atol; ATK ratios cannot be converted to these")
     if args.seed_count < 1 or args.cpu_threads < 1:
         parser.error("--seed-count and --cpu-threads must be positive")
     torch, ascendc, environment = npu_runtime(args.device)
@@ -359,7 +454,9 @@ def main(argv=None):
                     # do not access a possibly poisoned device context again.
                     torch.save({"case": case_description(record), "seed": seed,
                                 "inputs": dict(zip(("q", "k", "v", "g", "beta"), inputs)),
-                                "initial_state": state, "dut": actual, "golden": expected}, dump)
+                                "initial_state": state, "dut": actual, "golden": expected,
+                                "comparison": {key: row[key] for key in ("passed", "outputs", "error")
+                                               if key in row}}, dump)
                     row["dump"] = str(dump.resolve())
                 failures += not row["passed"]
                 report["results"].append(row)

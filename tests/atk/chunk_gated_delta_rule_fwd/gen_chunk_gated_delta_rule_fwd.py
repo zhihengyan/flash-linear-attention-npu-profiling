@@ -60,6 +60,7 @@ class ChunkGatedDeltaRuleFwdGenerator(CaseGenerator):
         case_config.inputs[K].shape = [batch, k_heads, tokens, 128]
         case_config.inputs[V].shape = [batch, v_heads, tokens, value_dim]
         case_config.inputs[G].shape = [batch, tokens, v_heads]
+        case_config.inputs[G].range_values = [-1, 0]
         case_config.inputs[BETA].shape = [batch, tokens, v_heads]
         case_config.inputs[SCALE].range_values = 1.0 / math.sqrt(128)
         case_config.inputs[CHUNK].range_values = chunk_size
