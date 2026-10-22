@@ -3,13 +3,14 @@ set -euo pipefail
 
 show_help() {
     cat <<'EOF'
-以可恢复分片方式运行 chunk_gated_delta_rule_fwd 双标杆精度矩阵。
+以可恢复分片方式运行融合算子与六 ACLNN 的 mixed_tolerance_bm 精度矩阵。
 
 用法：
   bash tests/atk/chunk_gated_delta_rule_fwd/scripts/run_matrix.sh [device]
 
 环境变量：
   GDN_ATK_CASE_JSON    用例 JSON，默认正式 500 条矩阵
+  DN_ATK_CASE_JSON     GDN_ATK_CASE_JSON 的兼容别名；两者同时设置时必须一致
   GDN_ATK_MATRIX_LABEL 结果标签，默认 generalized500
   GDN_ATK_MATRIX_ROOT  精确矩阵结果目录
   GDN_ATK_SHARD_SIZE   每个 fresh ATK 进程的 case 数，默认 25
@@ -26,7 +27,11 @@ fi
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
 op_dir=$(cd -- "$script_dir/.." && pwd)
 device=${1:-0}
-case_json=${GDN_ATK_CASE_JSON:-$op_dir/atk_chunk_gated_delta_rule_fwd.json}
+if [[ -n "${GDN_ATK_CASE_JSON:-}" && -n "${DN_ATK_CASE_JSON:-}" && "$GDN_ATK_CASE_JSON" != "$DN_ATK_CASE_JSON" ]]; then
+    echo "GDN_ATK_CASE_JSON 与 DN_ATK_CASE_JSON 指向不同用例，请只设置一个" >&2
+    exit 2
+fi
+case_json=${GDN_ATK_CASE_JSON:-${DN_ATK_CASE_JSON:-$op_dir/atk_chunk_gated_delta_rule_fwd.json}}
 matrix_label=${GDN_ATK_MATRIX_LABEL:-generalized500}
 shard_size=${GDN_ATK_SHARD_SIZE:-25}
 matrix_start=${GDN_ATK_MATRIX_START:-0}
@@ -59,6 +64,7 @@ if (( matrix_start > 0 )) && [[ -z "$matrix_root_override" ]]; then
     exit 2
 fi
 mkdir -p "$matrix_root"
+matrix_root=$(cd -- "$matrix_root" && pwd)
 
 for ((start = matrix_start; start < case_count; start += shard_size)); do
     end=$((start + shard_size))
@@ -73,6 +79,8 @@ from pathlib import Path
 summary_path = Path(sys.argv[1])
 start, end = map(int, sys.argv[2:])
 summary = json.loads(summary_path.read_text(encoding="utf-8"))
+if summary.get("accuracy_standard") != "mixed_tolerance_bm":
+    raise SystemExit("已有分片不是 mixed_tolerance_bm 结果，请使用新的 GDN_ATK_MATRIX_ROOT")
 ids = [int(value) for value in (summary.get("statistic") or {}).get("case_ids", [])]
 expected = list(range(start, end))
 if int(summary.get("expected_cases", -1)) != len(expected) or sorted(ids) != expected:
@@ -86,6 +94,7 @@ PY
     fi
     [[ ! -e "$shard_root" ]] || { echo "不完整分片已存在，拒绝覆盖：$shard_root" >&2; exit 2; }
     set +e
+    DN_ATK_CASE_JSON= \
     GDN_ATK_CASE_JSON="$case_json" \
     GDN_ATK_RESULT_DIR="$shard_root" \
     GDN_ATK_MAX_TASK=${GDN_ATK_MAX_TASK:-1} \

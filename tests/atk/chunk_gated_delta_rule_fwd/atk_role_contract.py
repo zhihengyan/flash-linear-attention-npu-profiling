@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
-"""ATK ``cv_fused_double_benchmark`` 的三路角色合同。"""
+"""ATK ``mixed_tolerance_bm`` 的融合算子与六 ACLNN 对照角色合同。"""
 
 from __future__ import annotations
 
 
-RUNTIME_ROLE_ORDER = ("dut", "benchmark", "golden")
+RUNTIME_ROLE_ORDER = ("dut", "benchmark")
 DUT_NODE_NAME = "phase6"
 DUT_NODE_NAMES = (DUT_NODE_NAME, "npu_dut")
 BENCHMARK_NODE_NAME = "gold"
-METRIC_TENSOR_PAIRS = {
-    "Actual": ("dut", "golden"),
-    "Benchmark": ("benchmark", "golden"),
-}
+METRIC_TENSOR_PAIRS = {"Actual": ("dut", "benchmark")}
 
 
 def role_for_atk_task(
@@ -19,7 +16,7 @@ def role_for_atk_task(
     node_name: str,
     is_benchmark_task: bool,
 ) -> str:
-    """按 ATK 自动 CPU golden 与两个命名 NPU node 映射三路角色。"""
+    """两个命名 NPU node 参与比较；CPU 参考分支只供独立排障。"""
 
     device = str(device).strip().lower()
     node_name = str(node_name).strip()

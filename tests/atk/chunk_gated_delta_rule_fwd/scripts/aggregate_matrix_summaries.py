@@ -13,9 +13,12 @@ def aggregate(root: Path, expected_cases: int) -> dict:
     case_ids: list[int] = []
     execution_failed: list[int] = []
     accuracy_failed: list[int] = []
+    failed_shards = []
     shards = []
     for path in shard_files:
         summary = json.loads(path.read_text(encoding="utf-8"))
+        if summary.get("passed") is not True or summary.get("accuracy_standard") != "mixed_tolerance_bm":
+            failed_shards.append(str(path.parent.relative_to(root)))
         statistic = summary.get("statistic") or {}
         ids = [int(value) for value in statistic.get("case_ids", [])]
         execution = [
@@ -51,9 +54,10 @@ def aggregate(root: Path, expected_cases: int) -> dict:
         and not duplicate_ids
         and sum(shard["expected_cases"] for shard in shards) == expected_cases
     )
-    passed = complete and not execution_failed and not accuracy_failed
+    passed = complete and not execution_failed and not accuracy_failed and not failed_shards
     return {
-        "schema": "gdn-core-double-benchmark-matrix-aggregate/v1",
+        "schema": "gdn-core-mixed-tolerance-matrix-aggregate/v1",
+        "accuracy_standard": "mixed_tolerance_bm",
         "expected_cases": expected_cases,
         "shard_count": len(shards),
         "observed_cases": len(unique_ids),
@@ -63,6 +67,7 @@ def aggregate(root: Path, expected_cases: int) -> dict:
         "extra_case_ids": extra_ids,
         "execution_failed_case_ids": execution_failed,
         "accuracy_failed_case_ids": accuracy_failed,
+        "failed_shards": failed_shards,
         "execution_success": expected_cases - len(execution_failed) if complete else None,
         "accuracy_passed": (
             expected_cases - len(set(execution_failed) | set(accuracy_failed))

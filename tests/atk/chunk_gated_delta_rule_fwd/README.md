@@ -8,21 +8,24 @@
 - `q/k`：`[B,Hk,T,128]`，BF16/FP16。
 - `v`：`[B,Hv,T,V]`，BF16/FP16，`V=128/256`，`Hv % Hk == 0`。
 - `g/beta`：`[B,T,Hv]`；`g` 为 FP32，`beta` 与 q/k/v 同 dtype。
+- ATK 的 `g` 取值范围固定为 `[-1, 0]`，表示不为正的逐 token 门控增量；三份正式 JSON、
+  历史矩阵 JSON、YAML 和生成器保持一致。输入整理不会对正值做截断或改号。
 - `chunk_size`：64 或 128。
 - 支持定长、变长、GVA、可选初始状态和可选最终状态。
 - SoC：A2 (`ascend910b`)、A3 (`ascend910_93`)、A5 (`ascend950`)。
 
 ## 精度标杆
 
-精度使用 ATK 原生 `cv_fused_double_benchmark`：
+精度使用 ATK `mixed_tolerance_bm`，在同一份同步输入上直接比较两路 NPU 输出：
 
 1. NPU DUT：`chunk_gated_delta_rule_fwd`；
 2. NPU benchmark：公开算子链 `chunk_local_cumsum`、`chunk_scaled_dot_kkt`、`solve_tri`、
-   `recompute_w_u_fwd`、`chunk_gated_delta_rule_fwd_h`、`chunk_fwd_o`；
-3. CPU golden：相同冻结输入上的 FP64 recurrence。
+   `recompute_w_u_fwd`、`chunk_gated_delta_rule_fwd_h`、`chunk_fwd_o`。
 
-公开 `solve_tri` 来自 main 已合入的 PR 398；融合 kernel 不引用该公开实现，只有双标杆链路调用它。
-比较阈值为最大相对误差比例 5、平均相对误差比例 1.5、均方根误差比例 1.5。
+公开 `solve_tri` 来自 main 已合入的 PR 398；融合 kernel 不引用该公开实现，只有六算子对照路径调用它。
+CPU FP64 recurrence 保留为独立排障参考，不参与这两个脚本入口的比较。阈值使用当前
+ATK 中显式注册的 `mixed_tolerance_bm` 默认配置，不沿用旧的误差比阈值；结果不能等同于
+原三路双标杆验收。正式精度结论仍需按仓内精度规则完成新比较标准的值域校准。
 
 ## 用例
 
@@ -60,18 +63,30 @@ python3 tests/atk/chunk_gated_delta_rule_fwd/aclnn_abi_contract.py
 `aLog/dtBias` 与扩展中间输出为空；`finalStateOutOptional` 是否为空决定是否输出 final state。
 尚未实现的扩展组合会显式返回参数错误，不会静默忽略。
 
-正式 500 条双标杆精度使用可恢复分片入口；默认每 25 条启动一个 fresh ATK 进程，避免
+正式 500 条用例使用可恢复分片入口；默认每 25 条启动一个 fresh ATK 进程，避免
 六算子 benchmark 长进程状态累积：
 
 ```bash
 bash tests/atk/chunk_gated_delta_rule_fwd/scripts/run_matrix.sh 0
 ```
 
-冒烟或单分片可直接使用三节点入口（默认 `-mt 5`）：
+6 条冒烟直接指定 MSS JSON，使用两个 NPU 节点（默认 `-mt 5`）：
 
 ```bash
+GDN_ATK_CASE_JSON="$PWD/tests/atk/chunk_gated_delta_rule_fwd/atk_chunk_gated_delta_rule_fwd_mss.json" \
 bash tests/atk/chunk_gated_delta_rule_fwd/scripts/run_double_benchmark.sh 0
 ```
+
+`DN_ATK_CASE_JSON` 兼容为 `GDN_ATK_CASE_JSON` 的别名；两者同时设置时必须一致。
+保留 `run_double_benchmark.sh` 文件名以兼容既有命令，实际执行的是双路 NPU 的
+`mixed_tolerance_bm` 精度比较。角色合同每 case 只要求 `dut` 和 `benchmark` 各一次，
+6 条冒烟应有 12 条角色记录。数值精度、执行失败和用例缺失仍会使脚本失败。
+
+切换比较标准后请使用新的结果目录；旧标准的分片 `summary.json` 不允许续跑复用。
+`g` 值域从 `[-1, 1]` 修正为 `[-1, 0]` 后，旧输入、输出和分片结果同样不能复用；
+请从新目录重新执行，不能将原值域的结果作为本轮验收依据。
+报告按列名解析，兼容有无“错误信息匹配用例个数”的 summary；没有逐 case 精度结果时
+不能判定通过。分片汇总保留失败状态，不会将失败分片汇总成通过。
 
 复跑历史矩阵：
 
@@ -89,6 +104,26 @@ bash tests/atk/run_test_cpu.sh -op=chunk_gated_delta_rule_fwd -npu_device_id=0 -
 ```
 
 正式结论必须记录代码 commit、ATK/CANN 版本、SoC、实际加载的 OPP、case JSON 哈希和原始报告。
+
+不依赖 ATK/NPU 的脚本合同回归：
+
+```bash
+python3 tests/atk/chunk_gated_delta_rule_fwd/scripts/test_benchmark_contract.py
+# 额外用模拟 ATK 走完 6 条冒烟、默认 20 个分片共 500 条及断点复用
+GDN_ATK_TEST_BASH="$(command -v bash)" \
+python3 tests/atk/chunk_gated_delta_rule_fwd/scripts/test_benchmark_contract.py
+```
+
+本地合同回归与模拟 ATK 入口只验证配置、角色和报告处理；实际 NPU 精度、混合容差值域
+校准、性能、确定性及内存检查均需在目标 ATK/CANN 环境完成后归档。
+
+2026-10-22 比较器迁移的本地回归：10 项通过，包含 6 条冒烟、默认 20 个分片的 500 条用例、断点复用，
+以及角色缺失和精度失败的拒绝通过检查。目标环境 ATK/NPU 实测及新标准的值域校准待完成，
+尚未形成正式精度验收结论。
+
+后续 `g` 值域修正已覆盖全部 4 份 JSON 的 1008 条用例、YAML 和生成器；静态配置与
+模拟 ATK 入口共 11 项回归通过。使用 ATK 接口替身执行生成器的全部 500 条配置，确认
+`g` 始终取 `[-1, 0]`；目标硬件上的值域校准和精度验收仍待完成。
 
 ## 十项返回接口回归
 

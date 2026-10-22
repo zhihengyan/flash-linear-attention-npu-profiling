@@ -3,7 +3,7 @@ set -euo pipefail
 
 show_help() {
     cat <<'EOF'
-运行 chunk_gated_delta_rule_fwd 的 ATK 原生三路双标杆精度测试。
+运行融合 chunk_gated_delta_rule_fwd 与六 ACLNN 算子链的 mixed_tolerance_bm 精度比较。
 
 用法：
   bash tests/atk/chunk_gated_delta_rule_fwd/scripts/run_double_benchmark.sh [device]
@@ -14,6 +14,7 @@ show_help() {
   ATK_OUTPUT_ROOT      结果根目录，默认算子目录下 atk_output/double_benchmark
   GDN_ATK_RESULT_DIR   可选精确结果目录，供分片入口调用
   GDN_ATK_CASE_JSON    用例 JSON，默认正式 500 条矩阵
+  DN_ATK_CASE_JSON     GDN_ATK_CASE_JSON 的兼容别名；两者同时设置时必须一致
   ACCURACY_START/END   可选 case 范围，必须同时设置
   GDN_ATK_MAX_TASK     ATK -mt 并发度，默认 5
   GDN_ATK_SINGLE_PROCESS 设为 1 时增加 --single_process
@@ -29,7 +30,11 @@ script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
 op_dir=$(cd -- "$script_dir/.." && pwd)
 device=${1:-0}
 atk_bin=${ATK_BIN:-atk}
-case_json=${GDN_ATK_CASE_JSON:-$op_dir/atk_chunk_gated_delta_rule_fwd.json}
+if [[ -n "${GDN_ATK_CASE_JSON:-}" && -n "${DN_ATK_CASE_JSON:-}" && "$GDN_ATK_CASE_JSON" != "$DN_ATK_CASE_JSON" ]]; then
+    echo "GDN_ATK_CASE_JSON 与 DN_ATK_CASE_JSON 指向不同用例，请只设置一个" >&2
+    exit 2
+fi
+case_json=${GDN_ATK_CASE_JSON:-${DN_ATK_CASE_JSON:-$op_dir/atk_chunk_gated_delta_rule_fwd.json}}
 max_task=${GDN_ATK_MAX_TASK:-5}
 single_process=${GDN_ATK_SINGLE_PROCESS:-0}
 start=${ACCURACY_START:-}
@@ -65,6 +70,14 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     cases = json.load(handle)
 if not isinstance(cases, list) or not cases:
     raise SystemExit("case JSON 必须是非空列表")
+for case in cases:
+    accuracy = case.get("standard", {}).get("acc")
+    if accuracy != "mixed_tolerance_bm" and not (
+        isinstance(accuracy, dict) and set(accuracy) == {"mixed_tolerance_bm"}
+    ):
+        raise SystemExit(
+            f"case {case.get('id')}: standard.acc 必须为 mixed_tolerance_bm，实际为 {accuracy!r}"
+        )
 print(len(cases))
 PY
 )
@@ -81,6 +94,7 @@ output_root=${ATK_OUTPUT_ROOT:-$op_dir/atk_output/double_benchmark}
 run_dir=${GDN_ATK_RESULT_DIR:-$output_root/$timestamp}
 [[ ! -e "$run_dir" ]] || { echo "结果目录已存在，拒绝覆盖：$run_dir" >&2; exit 2; }
 mkdir -p "$run_dir"
+run_dir=$(cd -- "$run_dir" && pwd)
 node_yaml="$run_dir/node.yaml"
 cat >"$node_yaml" <<EOF
 nodes:
@@ -102,7 +116,7 @@ fi
 task_log="$run_dir/atk_task.log"
 printf '%q ' "$atk_bin" task -c "$case_json" -n "$node_yaml" \
     -p "$op_dir/executor_chunk_gated_delta_rule_fwd.py" --task accuracy \
-    -bd cpu --syc_dataset --save_data input --save_data output --save_data profile \
+    --syc_dataset --save_data input --save_data output \
     -mt "$max_task" "${execution_args[@]}" "${range_args[@]}" >"$run_dir/command.txt"
 printf '\n' >>"$run_dir/command.txt"
 
@@ -114,11 +128,9 @@ set +e
         -n "$node_yaml" \
         -p "$op_dir/executor_chunk_gated_delta_rule_fwd.py" \
         --task accuracy \
-        -bd cpu \
         --syc_dataset \
         --save_data input \
         --save_data output \
-        --save_data profile \
         -mt "$max_task" \
         "${execution_args[@]}" \
         "${range_args[@]}"
@@ -142,4 +154,4 @@ python3 "$script_dir/summarize_atk_report.py" "$report_file" \
     --json-out "$run_dir/summary.json" \
     --expected-cases "$expected_cases"
 
-echo "双标杆精度测试完成：$run_dir"
+echo "融合算子与六 ACLNN 的 mixed_tolerance_bm 精度比较完成：$run_dir"

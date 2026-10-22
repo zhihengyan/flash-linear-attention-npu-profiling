@@ -10,7 +10,7 @@ import zipfile
 from pathlib import Path
 from xml.etree import ElementTree
 
-PASS_WORDS = {"pass", "passed", "success", "successful", "true"}
+PASS_WORDS = {"pass", "passed", "success", "successful", "true", "1", "通过"}
 MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -105,6 +105,8 @@ def _statistic_result(path: Path) -> dict[str, object]:
     accuracy_indexes = [
         index for index, value in enumerate(headers) if value.endswith("精度通过")
     ]
+    if not accuracy_indexes:
+        raise ValueError("statistic 缺少精度通过列，不能确认实际完成了精度比较")
     case_ids: list[int] = []
     execution_failed: list[int] = []
     accuracy_failed: list[int] = []
@@ -118,7 +120,9 @@ def _statistic_result(path: Path) -> dict[str, object]:
             execution_failed.append(case_id)
         accuracy_values = [padded[index] for index in accuracy_indexes]
         effective_accuracy = [value for value in accuracy_values if value is not None]
-        if effective_accuracy and not all(bool(value) for value in effective_accuracy):
+        if not effective_accuracy or not all(
+            str(value).strip().lower() in PASS_WORDS for value in effective_accuracy
+        ):
             accuracy_failed.append(case_id)
     return {
         "row_count": len(case_ids),
@@ -140,72 +144,112 @@ def _number(value):
             return value
 
 
+def _summary_result(path: Path) -> list[dict]:
+    sheet_rows = _xlsx_rows(path, "summary")
+    if not sheet_rows:
+        return []
+    headers = [str(value or "").strip() for value in sheet_rows[0]]
+    columns = {
+        "node": ("名称",),
+        "total_cases": ("总用例数",),
+        "execution_success": ("执行成功用例个数",),
+        "execution_failed": ("执行失败用例个数",),
+        "accuracy_passed": ("通过用例个数", "精度通过用例个数"),
+        "message_matched": ("错误信息匹配用例个数",),
+        "pass_rate": ("通过率", "精度通过率"),
+        "status": ("精度是否达标",),
+    }
+    indexes = {}
+    for field, names in columns.items():
+        indexes[field] = next((headers.index(name) for name in names if name in headers), None)
+        if indexes[field] is None and field not in {"message_matched", "pass_rate"}:
+            raise ValueError(f"summary 缺少 {names[0]} 列：{headers}")
+    rows = []
+    for values in sheet_rows[1:]:
+        if not values or all(value is None for value in values):
+            continue
+        padded = list(values) + [None] * max(0, len(headers) - len(values))
+        row = {
+            field: None if index is None else padded[index]
+            for field, index in indexes.items()
+        }
+        for field in columns.keys() - {"node", "status"}:
+            row[field] = _number(row[field])
+        row["status"] = str(row["status"] or "").strip()
+        row["passed"] = row["status"].lower() in PASS_WORDS
+        rows.append(row)
+    return rows
+
+
+def summarize_report(report: Path, expected_cases: int) -> dict:
+    if expected_cases <= 0:
+        raise ValueError("expected_cases 必须是正整数")
+    rows = _summary_result(report)
+
+    errors = []
+    if not rows:
+        errors.append("summary 无数据行")
+    for row in rows:
+        if row["total_cases"] != expected_cases:
+            errors.append(
+                f"{row['node']}: total_cases={row['total_cases']} != {expected_cases}"
+            )
+        if row["execution_success"] != expected_cases:
+            errors.append(
+                f"{row['node']}: execution_success={row['execution_success']} != {expected_cases}"
+            )
+        if row["accuracy_passed"] != expected_cases:
+            errors.append(
+                f"{row['node']}: accuracy_passed={row['accuracy_passed']} != {expected_cases}"
+            )
+        if not row["passed"]:
+            errors.append(f"{row['node']}: status={row['status']!r}")
+
+    statistic = _statistic_result(report)
+    if statistic["row_count"] != expected_cases:
+        errors.append(
+            f"statistic: row_count={statistic['row_count']} != {expected_cases}"
+        )
+    if len(set(statistic["case_ids"])) != statistic["row_count"]:
+        errors.append("statistic 存在重复 case id")
+    if statistic["execution_failed_case_ids"]:
+        errors.append(f"statistic 存在执行失败：{statistic['execution_failed_case_ids']}")
+    if statistic["accuracy_failed_case_ids"]:
+        errors.append(f"statistic 存在精度失败：{statistic['accuracy_failed_case_ids']}")
+    return {
+        "schema": "gdn-core-mixed-tolerance-atk-summary/v1",
+        "accuracy_standard": "mixed_tolerance_bm",
+        "report": str(report),
+        "expected_cases": expected_cases,
+        "rows": rows,
+        "statistic": statistic,
+        "passed": not errors,
+        "errors": errors,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path)
     parser.add_argument("--json-out", type=Path, required=True)
     parser.add_argument("--expected-cases", type=int, required=True)
     args = parser.parse_args()
-
-    rows = []
-    for values in _xlsx_rows(args.report, "summary")[1:]:
-        if not values or all(value is None for value in values):
-            continue
-        padded = list(values) + [None] * max(0, 8 - len(values))
-        status = str(padded[7] or "").strip()
-        rows.append(
-            {
-                "node": padded[0],
-                "total_cases": _number(padded[1]),
-                "execution_success": _number(padded[2]),
-                "execution_failed": _number(padded[3]),
-                "accuracy_passed": _number(padded[4]),
-                "message_matched": _number(padded[5]),
-                "pass_rate": _number(padded[6]),
-                "status": status,
-                "passed": status.lower() in PASS_WORDS,
-            }
-        )
-
-    errors = []
-    if not rows:
-        errors.append("summary 无数据行")
-    for row in rows:
-        if row["total_cases"] != args.expected_cases:
-            errors.append(
-                f"{row['node']}: total_cases={row['total_cases']} != {args.expected_cases}"
-            )
-        if row["execution_success"] != args.expected_cases:
-            errors.append(
-                f"{row['node']}: execution_success={row['execution_success']} != {args.expected_cases}"
-            )
-        if row["accuracy_passed"] != args.expected_cases:
-            errors.append(
-                f"{row['node']}: accuracy_passed={row['accuracy_passed']} != {args.expected_cases}"
-            )
-        if not row["passed"]:
-            errors.append(f"{row['node']}: status={row['status']!r}")
-
-    statistic = _statistic_result(args.report)
-    if statistic["row_count"] != args.expected_cases:
-        errors.append(
-            f"statistic: row_count={statistic['row_count']} != {args.expected_cases}"
-        )
-    result = {
-        "schema": "gdn-core-double-benchmark-atk-summary/v1",
-        "report": str(args.report),
-        "expected_cases": args.expected_cases,
-        "rows": rows,
-        "statistic": statistic,
-        "passed": not errors,
-        "errors": errors,
-    }
+    try:
+        result = summarize_report(args.report, args.expected_cases)
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
+        result = {
+            "accuracy_standard": "mixed_tolerance_bm",
+            "report": str(args.report),
+            "expected_cases": args.expected_cases,
+            "passed": False,
+            "errors": [str(exc)],
+        }
     args.json_out.parent.mkdir(parents=True, exist_ok=True)
     args.json_out.write_text(
         json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     print(json.dumps(result, indent=2, ensure_ascii=False))
-    return 0 if not errors else 99
+    return 0 if result["passed"] else 99
 
 
 if __name__ == "__main__":

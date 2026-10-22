@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""从 ATK 日志核验每个 case 的三个命名执行角色。"""
+"""从 ATK 日志核验每个 case 的融合算子和六 ACLNN 对照角色。"""
 
 from __future__ import annotations
 
