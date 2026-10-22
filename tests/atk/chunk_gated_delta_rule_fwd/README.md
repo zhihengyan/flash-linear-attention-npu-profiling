@@ -49,6 +49,10 @@ A5 模型 shape 分别来源于 `推理model.csv` 和 `训练model.csv`，原文
 
 ## 执行
 
+不安装 ATK、直接用 Python 检查 A5 融合前向精度或调用 CANN msopprof 时，使用
+[`scripts/README_standalone_a5.md`](scripts/README_standalone_a5.md) 中的两个独立入口。
+精度入口复用现有 CPU FP64 golden，要求显式提供混合容差；该结果与下文 ATK 双标杆判据不同。
+
 先执行不依赖 NPU/ATK 的 ACLNN ABI 合同，确认公开参数顺序、ctypes 类型和默认路径映射：
 
 ```bash
