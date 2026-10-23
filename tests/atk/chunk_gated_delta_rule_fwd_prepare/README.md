@@ -204,6 +204,56 @@ atk node --name npu_dut --backend npu --devices 0 \
 
 ## 执行方式
 
+### 使用 Python 应用进行 msprof op 采样
+
+`scripts/profile_msprof.py` 直接读取本目录冻结的 `_perf.json`，无需 ATK。性能 JSON 顶层
+case id 为 **0、24、48、72、96、120**；它们分别对应 G=1/2/3/4 的 V128，以及 G=1/2
+的 V256，不能用文件内位置 0～5 代替 case id。
+
+输入沿用 executor 的 `case_spec`、固定 seed 和 `_randn`：q/k/v 正态分布标准差 0.05，
+g 为 0.2，beta 为 0.5；先在 CPU 生成 FP32，再量化到声明的 dtype 并搬至 NPU。
+各 flag、output_a 和可选变长元数据按 case_spec 构造；无需导入 ATK 或运行 CPU golden。
+
+先加载 CANN 和当前分支 wheel 的 OPP 环境，在安装 torch、torch_npu、fla_npu 的 Linux/
+Ascend950 环境中，从仓库根目录执行：
+
+```bash
+python tests/atk/chunk_gated_delta_rule_fwd_prepare/scripts/profile_msprof.py --list-cases
+python tests/atk/chunk_gated_delta_rule_fwd_prepare/scripts/profile_msprof.py --case-id 120 --dry-run
+
+msprof op \
+  --application="python tests/atk/chunk_gated_delta_rule_fwd_prepare/scripts/profile_msprof.py --case-id 0 --device 0 --warmup 10 --iterations 1" \
+  --mstx=on --mstx-include=chunk_gated_delta_rule_fwd_prepare \
+  --kernel-name="*" --launch-count=5000 --aic-metrics=Default \
+  --output=./output/msprof/gdn_prepare_case0
+```
+
+全部六条性能用例分别启动进程采集：
+
+```bash
+for CASE_ID in 0 24 48 72 96 120; do
+  msprof op \
+    --application="python tests/atk/chunk_gated_delta_rule_fwd_prepare/scripts/profile_msprof.py --case-id $CASE_ID --device 0 --warmup 10 --iterations 1" \
+    --mstx=on --mstx-include=chunk_gated_delta_rule_fwd_prepare \
+    --kernel-name="*" --launch-count=5000 --aic-metrics=Default \
+    --output="./output/msprof/gdn_prepare_case${CASE_ID}"
+done
+```
+
+`--warmup` 为应用预热次数，`--iterations` 为区间内公开接口调用次数；默认分别为 10、1。
+数据生成、H2D 和预热位于 MSTX 区间外，只采集正式调用。脚本输出实际包路径、版本、设备、
+完整 case 配置和 JSON SHA256；支持 `--seed` 覆盖随机种子、`--case-json` 选择另一份
+冻结 JSON。`--list-cases` 和 `--dry-run` 不依赖 torch/NPU。
+
+保留命令中的 `--mstx=on`、`--mstx-include`、`--kernel-name="*"` 和足够的
+`--launch-count`，避免只采到首个 kernel 或预热。查看 `OpBasicInfo.csv` 的
+`Task Duration(us)` 以及 `PipeUtilization.csv` 等文件；工具的默认 kernel replay 会改变
+缓存条件，不能用其结果直接替代 ATK/msprof `op_summary` 的正式性能验收。
+参数含义及结果字段见官方 [msOpProf 使用指南](https://github.com/Ascend/msopprof/blob/master/docs/en/user_guide/msopprof_user_guide.md)
+和 [性能数据说明](https://github.com/Ascend/msopprof/blob/master/docs/en/user_guide/msopprof_performance_data.md)。
+
+### ATK 正式验证
+
 本算子有 9 路输出（`l2norm=False` 时 rstd 为 `None`，`output_a=False` 时 A 为 `None`，比较时丢掉）。ATK 默认 GM 初始化会把 HBM 顶满，后续 case 会卡在 `rtStreamSynchronize`。精度请关 GM init；一次跑满 2416 若占卡，按 **12** 条分批（`CASE_END` 不含右端；50 条一批容易卡住）。
 
 本容器没有 `/dev/davinciN`，ATK 只能看到 device 0；请用 `-npu_device_id=0`，`ATK_OUTPUT_ROOT` 建议用绝对路径。

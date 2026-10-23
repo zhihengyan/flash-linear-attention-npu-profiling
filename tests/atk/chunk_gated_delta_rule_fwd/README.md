@@ -105,6 +105,60 @@ bash tests/atk/run_test_cpu.sh -op=chunk_gated_delta_rule_fwd -npu_device_id=0 -
 
 正式结论必须记录代码 commit、ATK/CANN 版本、SoC、实际加载的 OPP、case JSON 哈希和原始报告。
 
+## 使用 Python 应用进行 msprof op 采样
+
+`scripts/profile_msprof.py` 直接读取本目录冻结的 `_perf.json`，无需 ATK。每个进程只运行
+一个 JSON case，支持 `--case-id`、`--device`、`--warmup`、`--iterations`、`--seed` 和
+`--case-json`。`--case-id` 使用 JSON 顶层的 `id`：0 为推理模型，1 为训练模型。
+
+q/k/v/g/beta 按 JSON 的 shape、dtype 和均匀分布值域在 CPU 构造，再搬到 NPU；初始状态
+沿用 executor 使用的 `deterministic_initial_state`。JSON 未指定 default_seed 时固定使用
+`20260817 + case_id`，五个张量依次使用 seed+1 至 seed+5。脚本不宣称与 ATK 未显式固定
+的随机数据逐位相同；两个分支使用同一 JSON 和 seed 可复现脚本输入。
+
+先激活目标 Linux/Ascend950 环境并加载 CANN、当前分支 wheel 的 OPP 环境；需安装
+torch、torch_npu 和 fla_npu。脚本打印实际包路径、设备名、版本、输入配置及 JSON SHA256，
+不自动改写 `PYTHONPATH` 或选择源码包覆盖已安装 wheel。
+
+从仓库根目录执行：
+
+```bash
+python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_msprof.py --list-cases
+python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_msprof.py --case-id 0 --dry-run
+
+msprof op \
+  --application="python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_msprof.py --case-id 0 --device 0 --warmup 10 --iterations 1" \
+  --mstx=on --mstx-include=chunk_gated_delta_rule_fwd \
+  --kernel-name="*" --launch-count=5000 --aic-metrics=Default \
+  --output=./output/msprof/gdn_fwd_case0
+```
+
+训练模型将 `--case-id 0` 改为 `--case-id 1`，并使用独立输出目录。批量采集两条模型：
+
+```bash
+for CASE_ID in 0 1; do
+  msprof op \
+    --application="python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_msprof.py --case-id $CASE_ID --device 0 --warmup 10 --iterations 1" \
+    --mstx=on --mstx-include=chunk_gated_delta_rule_fwd \
+    --kernel-name="*" --launch-count=5000 --aic-metrics=Default \
+    --output="./output/msprof/gdn_fwd_case${CASE_ID}"
+done
+```
+
+输入构造、H2D、初始状态准备和 10 次应用预热都位于 MSTX 区间外。区间内只调用公开前向
+接口并等待完成，包含它产生的 Prepare/H/O 和 Cast/Transpose 等辅助 kernel；不运行 CPU
+golden、反向或输出拷回检查。`--iterations` 控制区间内公开接口调用次数，默认 1；工具自身
+的 `--warm-up` 控制 kernel replay 的预热，与脚本的 `--warmup` 不同。
+
+必须保留命令中的 MSTX、通配 kernel 和 launch-count 参数，否则工具默认可能只采到
+首个 kernel。读取各 kernel 的 `OpBasicInfo.csv` 中 `Task Duration(us)`，同时核对 kernel
+名称及采集数量；不要把 AIC/AIV 时间相加，也不要用 Python 运行时间计算收益。
+`msprof op` 默认进行逐 kernel replay，用于定点分析，不能直接替代原调用链端到端性能验收；
+正式性能结论仍按仓内 ATK/msprof `op_summary` 口径执行。
+
+参数与数据字段参考官方 [msOpProf 使用指南](https://github.com/Ascend/msopprof/blob/master/docs/en/user_guide/msopprof_user_guide.md)
+和 [性能数据说明](https://github.com/Ascend/msopprof/blob/master/docs/en/user_guide/msopprof_performance_data.md)。
+
 不依赖 ATK/NPU 的脚本合同回归：
 
 ```bash
