@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import io
+import json
 from pathlib import Path
 import sys
 import types
@@ -90,7 +91,7 @@ class MsprofRunnerTest(unittest.TestCase):
     def test_setup_and_warmup_are_outside_native_range(self):
         library, events, active = self.native_library(9)
         with patch.object(msprof_runner.ctypes, "CDLL", return_value=library):
-            calls, setup, output = self.run_application(active)
+            calls, setup, output = self.run_application(active, "--mstx")
         self.assertEqual(setup, [False])
         self.assertEqual([item[0] for item in calls], [False, False, True, True, True])
         self.assertEqual(len({id(item[1][0]) for item in calls}), 1)
@@ -101,7 +102,7 @@ class MsprofRunnerTest(unittest.TestCase):
         library, events, active = self.native_library(0)
         with patch.object(msprof_runner.ctypes, "CDLL", return_value=library):
             with self.assertRaisesRegex(RuntimeError, "returned 0"):
-                self.run_application(active)
+                self.run_application(active, "--mstx")
         self.assertEqual(events, [("start", b"chunk_gated_delta_rule_fwd", None)])
 
     def test_no_mstx_does_not_load_library(self):
@@ -110,6 +111,26 @@ class MsprofRunnerTest(unittest.TestCase):
         self.assertEqual(setup, [False])
         self.assertEqual([item[0] for item in calls], [False] * 5)
         self.assertNotIn("[MSTX] native range started", output)
+
+    def test_default_mode_does_not_load_mstx_library(self):
+        with patch.object(msprof_runner.ctypes, "CDLL", side_effect=AssertionError("must not load MSTX")):
+            calls, setup, output = self.run_application([False])
+        self.assertEqual(setup, [False])
+        self.assertEqual(len(calls), 5)
+        self.assertIn('"collection_mode": "kernel_name_filter"', output)
+        self.assertIn("[COLLECTION] MSTX disabled", output)
+
+    def test_default_sampling_counts(self):
+        script = Path(__file__).resolve().parents[1] / "chunk_gated_delta_rule_fwd/scripts/profile_msprof.py"
+        output = io.StringIO()
+        with patch.object(sys, "argv", [str(script), "--dry-run"]), contextlib.redirect_stdout(output):
+            msprof_runner.main(
+                "chunk_gated_delta_rule_fwd", script, lambda row: {"seed": 123}, None,
+            )
+        config = json.loads(output.getvalue())
+        self.assertEqual(config["warmup"], 0)
+        self.assertEqual(config["iterations"], 10)
+        self.assertEqual(config["collection_mode"], "kernel_name_filter")
 
     def test_missing_library_has_actionable_error(self):
         with patch.object(msprof_runner.ctypes, "CDLL", side_effect=OSError("not found")):

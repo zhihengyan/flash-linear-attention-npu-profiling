@@ -40,10 +40,9 @@ class NativeMstx:
         if not range_id:
             raise RuntimeError(
                 "Native mstxRangeStartA returned 0: no collection range was created. "
-                f"Run msprof op with --mstx=on --mstx-include={message}; "
-                "check the CANN/msprof versions and loaded MSTX library. "
-                "For a kernel-filter diagnostic use --no-mstx in the application "
-                "and omit --mstx/--mstx-include from msprof."
+                "Use kernel-name collection: pass --no-mstx in the application, "
+                "omit --mstx/--mstx-include from msprof, and select explicit kernel prefixes. "
+                "The marker injection/library problem needs separate device investigation."
             )
         return range_id
 
@@ -77,7 +76,7 @@ def chunk_indices(cu_seqlens, chunk_size):
 
 
 def main(op_name, script_path, case_config, build_call):
-    """Load one frozen case, prepare once, warm up, then mark NPU calls only."""
+    """Run a frozen case; collect by CLI kernel prefix or optional MSTX range."""
     parser = argparse.ArgumentParser(
         description=f"Standalone {op_name} application for msprof op; no ATK required."
     )
@@ -87,11 +86,14 @@ def main(op_name, script_path, case_config, build_call):
     )
     parser.add_argument("--case-id", type=int, default=0, help="top-level id in the performance JSON")
     parser.add_argument("--device", type=_nonnegative, default=0, help="logical NPU device id")
-    parser.add_argument("--warmup", type=_nonnegative, default=10)
-    parser.add_argument("--iterations", type=_positive, default=1, help="public API calls inside MSTX range")
+    parser.add_argument("--warmup", type=_nonnegative, default=0, help="application warmups; also eligible for capture without MSTX")
+    parser.add_argument("--iterations", type=_positive, default=10, help="public API calls to submit for collection")
     parser.add_argument("--seed", type=_nonnegative, help="override the case's deterministic input seed")
     parser.add_argument("--mstx-lib", default="libms_tools_ext.so", help="native MSTX library name or absolute path")
-    parser.add_argument("--no-mstx", action="store_true", help="diagnostic mode: omit msprof --mstx flags and select an explicit kernel name")
+    collection = parser.add_mutually_exclusive_group()
+    collection.add_argument("--mstx", dest="use_mstx", action="store_true", help="opt in to native MSTX; requires msprof --mstx=on")
+    collection.add_argument("--no-mstx", dest="use_mstx", action="store_false", help="collect by CLI kernel name without MSTX (default)")
+    parser.set_defaults(use_mstx=False)
     parser.add_argument("--list-cases", action="store_true", help="list JSON ids without importing torch")
     parser.add_argument("--dry-run", action="store_true", help="validate and print configuration without torch/NPU")
     options = parser.parse_args()
@@ -124,9 +126,10 @@ def main(op_name, script_path, case_config, build_call):
         "device": options.device,
         "warmup": options.warmup,
         "iterations": options.iterations,
-        "mstx_range": None if options.no_mstx else op_name,
-        "mstx_backend": "disabled" if options.no_mstx else "native_ctypes",
-        "mstx_library": None if options.no_mstx else options.mstx_lib,
+        "collection_mode": "mstx_range" if options.use_mstx else "kernel_name_filter",
+        "mstx_range": op_name if options.use_mstx else None,
+        "mstx_backend": "native_ctypes" if options.use_mstx else "disabled",
+        "mstx_library": options.mstx_lib if options.use_mstx else None,
         "config": config,
     }
     if options.dry_run:
@@ -142,7 +145,7 @@ def main(op_name, script_path, case_config, build_call):
     torch.npu.set_device(options.device)
     torch.npu.config.allow_internal_format = False
     torch.npu.set_compile_mode(jit_compile=False)
-    mstx = None if options.no_mstx else NativeMstx(options.mstx_lib)
+    mstx = NativeMstx(options.mstx_lib) if options.use_mstx else None
     operation = getattr(ascendc, op_name)
     device = torch.device(f"npu:{options.device}")
     metadata.update({
@@ -153,6 +156,12 @@ def main(op_name, script_path, case_config, build_call):
         "device_name": torch.npu.get_device_name(options.device),
     })
     print(json.dumps(metadata, indent=2), flush=True)
+    if mstx is None:
+        print(
+            "[COLLECTION] MSTX disabled: omit msprof --mstx/--mstx-include. "
+            "Use explicit --kernel-name prefixes. Application warmups can also be captured; "
+            "use --warmup 0 and the tool's --warm-up for kernel replay warmup.", flush=True,
+        )
     with torch.no_grad():
         args, kwargs = build_call(config, torch, device, seed)
         torch.npu.synchronize()

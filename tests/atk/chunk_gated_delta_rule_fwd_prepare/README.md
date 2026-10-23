@@ -206,74 +206,62 @@ atk node --name npu_dut --backend npu --devices 0 \
 
 ### 使用 Python 应用进行 msprof op 采样
 
-`scripts/profile_msprof.py` 直接读取本目录冻结的 `_perf.json`，无需 ATK。性能 JSON 顶层
-case id 为 **0、24、48、72、96、120**；它们分别对应 G=1/2/3/4 的 V128，以及 G=1/2
-的 V256，不能用文件内位置 0～5 代替 case id。
+`scripts/profile_msprof.py` 直接读取本目录冻结的 `_perf.json`，无需 ATK。性能 case id 为
+**0、24、48、72、96、120**，分别覆盖 G=1/2/3/4 的 V128，以及 G=1/2 的 V256。
 
-输入沿用 executor 的 `case_spec`、固定 seed 和 `_randn`：q/k/v 正态分布标准差 0.05，
-g 为 0.2，beta 为 0.5；先在 CPU 生成 FP32，再量化到声明的 dtype 并搬至 NPU。
-各 flag、output_a 和可选变长元数据按 case_spec 构造；无需导入 ATK 或运行 CPU golden。
+输入沿用 executor 的 case_spec 和 `_randn`：q/k/v 正态分布标准差 0.05，g 为 0.2，
+beta 为 0.5；先在 CPU 生成 FP32，再量化到声明 dtype 并搬到 NPU。固定 seed、各 flag、
+output_a 和可选变长元数据按 case_spec 构造，支持 `--seed` 和 `--case-json`。
 
-先加载 CANN 和当前分支 wheel 的 OPP 环境，在安装 torch、torch_npu、fla_npu 的 Linux/
-Ascend950 环境中，从仓库根目录执行：
+默认不调用 MSTX，通过 CLI 的明确 kernel 前缀采集。先加载 CANN 和当前分支 wheel 的
+OPP 环境，在 Linux/Ascend950 环境中从仓库根目录执行：
 
 ```bash
-python tests/atk/chunk_gated_delta_rule_fwd_prepare/scripts/profile_msprof.py --list-cases
-python tests/atk/chunk_gated_delta_rule_fwd_prepare/scripts/profile_msprof.py --case-id 120 --dry-run
-
 msprof op \
-  --application="python tests/atk/chunk_gated_delta_rule_fwd_prepare/scripts/profile_msprof.py --case-id 0 --device 0 --warmup 10 --iterations 1" \
-  --mstx=on --mstx-include=chunk_gated_delta_rule_fwd_prepare \
-  --kernel-name="*" --launch-count=5000 --aic-metrics=Default \
-  --output=./output/msprof/gdn_prepare_case0
+  --application="python tests/atk/chunk_gated_delta_rule_fwd_prepare/scripts/profile_msprof.py --case-id 0 --device 0 --warmup 0 --iterations 10 --no-mstx" \
+  --kernel-name=chunk_gated_delta_rule_fwd_prepare \
+  --launch-count=10 --warm-up=20 --aic-metrics=Default \
+  --output=./output/msprof/gdn_prepare_case0_kernel_filter
 ```
 
-全部六条性能用例分别启动进程采集：
+不要给这个命令添加 `--mstx=on` 或 `--mstx-include`。先前用户环境中原生 MSTX 返回 0，
+未建立采集区间；默认入口已绕过这一阻塞。该事实不能单独确定动态库解析或工具注入的根因。
+
+批量采集全部六条性能用例（复跑使用新目录）：
 
 ```bash
 for CASE_ID in 0 24 48 72 96 120; do
   msprof op \
-    --application="python tests/atk/chunk_gated_delta_rule_fwd_prepare/scripts/profile_msprof.py --case-id $CASE_ID --device 0 --warmup 10 --iterations 1" \
-    --mstx=on --mstx-include=chunk_gated_delta_rule_fwd_prepare \
-    --kernel-name="*" --launch-count=5000 --aic-metrics=Default \
-    --output="./output/msprof/gdn_prepare_case${CASE_ID}"
+    --application="python tests/atk/chunk_gated_delta_rule_fwd_prepare/scripts/profile_msprof.py --case-id $CASE_ID --device 0 --warmup 0 --iterations 10 --no-mstx" \
+    --kernel-name=chunk_gated_delta_rule_fwd_prepare \
+    --launch-count=10 --warm-up=20 --aic-metrics=Default \
+    --output="./output/msprof/gdn_prepare_case${CASE_ID}_kernel_filter"
 done
 ```
 
-`--warmup` 为应用预热次数，`--iterations` 为区间内公开接口调用次数；默认分别为 10、1。
-数据生成、H2D 和预热位于 MSTX 区间外，只采集正式调用。脚本输出实际包路径、版本、设备、
-完整 case 配置和 JSON SHA256；支持 `--seed` 覆盖随机种子、`--case-json` 选择另一份
-冻结 JSON。`--list-cases` 和 `--dry-run` 不依赖 torch/NPU。
+脚本默认应用预热 0 次、提交 10 次公开接口调用。关闭应用预热可避免它们进入无 MSTX 的
+采集；工具的 `--warm-up=20` 负责 kernel replay 预热。Prepare 一次调用的目标 kernel
+对应一条采样，增大 iterations 时同时增大 launch-count，核对报告中的实际采集数量。
 
-MSTX 通过 `ctypes` 直接调用 CANN 的 `libms_tools_ext.so`，不经过 torch_npu profiler 的
-启用状态判断。正常采集会打印 `[MSTX] native range started: id=...`；range id 为 0 会
-立即报错，不能把 Python 调用完成当成采样成功。找不到库时 source CANN 环境，或用
-`--mstx-lib /absolute/path/libms_tools_ext.so` 指定。调用方式见官方
-[MSTX Python ctypes 示例](https://github.com/Ascend/mstx/blob/master/docs/en/api_reference/Common/mstxRangeStartA.md)。
-
-遇到 `No profiling data matched` 或空目录，先关闭区间过滤，以源码中的 Prepare kernel
-入口名做一次最小采样：
+`--list-cases` 和 `--dry-run` 只读取、校验配置，无需 torch/NPU，也不是采样的前置步骤：
 
 ```bash
-msprof op \
-  --application="python tests/atk/chunk_gated_delta_rule_fwd_prepare/scripts/profile_msprof.py --case-id 0 --device 0 --warmup 0 --iterations 1 --no-mstx" \
-  --kernel-name=chunk_gated_delta_rule_fwd_prepare --launch-count=1 \
-  --aic-metrics=Default --output=./output/msprof/prepare_diagnostic
+python tests/atk/chunk_gated_delta_rule_fwd_prepare/scripts/profile_msprof.py --list-cases
+python tests/atk/chunk_gated_delta_rule_fwd_prepare/scripts/profile_msprof.py --case-id 120 --dry-run
 ```
 
-此命令不要加 `--mstx`、`--mstx-include`，也不要继续使用 `--kernel-name="*"`，以便独立
-检查 kernel 名称匹配和 dump 生成。若仍为空，保留完整命令、msprof/CANN/torch_npu 版本及
-完整日志；不能仅从这条 warning 判断是通配符出错。工具导出非空 kernel 报告才算采样成功。
+读取 `OpBasicInfo.csv` 的 `Task Duration(us)` 及 `PipeUtilization.csv` 等文件。工具默认
+逐 kernel replay，会改变缓存条件，结果用于定点分析；正式性能验收仍按 ATK/msprof
+`op_summary` 的口径。只有非空 kernel 报告才算采集成功；若仍为空，保存完整命令、版本、
+完整日志及原始 dump，继续排查实际 kernel 名称及工具注入，而非重复依赖 MSTX 的命令。
 
-正式区间采样保留命令中的 `--mstx=on`、`--mstx-include`、`--kernel-name="*"` 和足够的
-`--launch-count`，避免只采到首个 kernel 或预热。查看 `OpBasicInfo.csv` 的
-`Task Duration(us)` 以及 `PipeUtilization.csv` 等文件；工具的默认 kernel replay 会改变
-缓存条件，不能用其结果直接替代 ATK/msprof `op_summary` 的正式性能验收。
-参数含义及结果字段见官方 [msOpProf 使用指南](https://github.com/Ascend/msopprof/blob/master/docs/en/user_guide/msopprof_user_guide.md)
+原生 MSTX 改为显式选项：应用加 `--mstx`，工具加 `--mstx=on` 和匹配的
+`--mstx-include=chunk_gated_delta_rule_fwd_prepare`。range id 为 0 时立即报错；动态库可通过
+`--mstx-lib` 指定。默认和显式 `--no-mstx` 均不会加载 `libms_tools_ext.so`。
+
+参数说明见官方 [msOpProf 使用指南](https://github.com/Ascend/msopprof/blob/master/docs/en/user_guide/msopprof_user_guide.md)
 和 [性能数据说明](https://github.com/Ascend/msopprof/blob/master/docs/en/user_guide/msopprof_performance_data.md)。
-
-`python tests/atk/common/test_msprof_runner.py` 可在 CPU 上回归 MSTX ABI、零 range id 拒绝、
-预热边界和无 MSTX 排查模式；设备上的非空报告仍需实际采样确认。
+CPU 回归为 `python tests/atk/common/test_msprof_runner.py`，不代替真实 NPU 非空报告检查。
 
 ### ATK 正式验证
 
