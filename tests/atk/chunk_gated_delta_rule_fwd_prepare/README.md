@@ -245,12 +245,35 @@ done
 完整 case 配置和 JSON SHA256；支持 `--seed` 覆盖随机种子、`--case-json` 选择另一份
 冻结 JSON。`--list-cases` 和 `--dry-run` 不依赖 torch/NPU。
 
-保留命令中的 `--mstx=on`、`--mstx-include`、`--kernel-name="*"` 和足够的
+MSTX 通过 `ctypes` 直接调用 CANN 的 `libms_tools_ext.so`，不经过 torch_npu profiler 的
+启用状态判断。正常采集会打印 `[MSTX] native range started: id=...`；range id 为 0 会
+立即报错，不能把 Python 调用完成当成采样成功。找不到库时 source CANN 环境，或用
+`--mstx-lib /absolute/path/libms_tools_ext.so` 指定。调用方式见官方
+[MSTX Python ctypes 示例](https://github.com/Ascend/mstx/blob/master/docs/en/api_reference/Common/mstxRangeStartA.md)。
+
+遇到 `No profiling data matched` 或空目录，先关闭区间过滤，以源码中的 Prepare kernel
+入口名做一次最小采样：
+
+```bash
+msprof op \
+  --application="python tests/atk/chunk_gated_delta_rule_fwd_prepare/scripts/profile_msprof.py --case-id 0 --device 0 --warmup 0 --iterations 1 --no-mstx" \
+  --kernel-name=chunk_gated_delta_rule_fwd_prepare --launch-count=1 \
+  --aic-metrics=Default --output=./output/msprof/prepare_diagnostic
+```
+
+此命令不要加 `--mstx`、`--mstx-include`，也不要继续使用 `--kernel-name="*"`，以便独立
+检查 kernel 名称匹配和 dump 生成。若仍为空，保留完整命令、msprof/CANN/torch_npu 版本及
+完整日志；不能仅从这条 warning 判断是通配符出错。工具导出非空 kernel 报告才算采样成功。
+
+正式区间采样保留命令中的 `--mstx=on`、`--mstx-include`、`--kernel-name="*"` 和足够的
 `--launch-count`，避免只采到首个 kernel 或预热。查看 `OpBasicInfo.csv` 的
 `Task Duration(us)` 以及 `PipeUtilization.csv` 等文件；工具的默认 kernel replay 会改变
 缓存条件，不能用其结果直接替代 ATK/msprof `op_summary` 的正式性能验收。
 参数含义及结果字段见官方 [msOpProf 使用指南](https://github.com/Ascend/msopprof/blob/master/docs/en/user_guide/msopprof_user_guide.md)
 和 [性能数据说明](https://github.com/Ascend/msopprof/blob/master/docs/en/user_guide/msopprof_performance_data.md)。
+
+`python tests/atk/common/test_msprof_runner.py` 可在 CPU 上回归 MSTX ABI、零 range id 拒绝、
+预热边界和无 MSTX 排查模式；设备上的非空报告仍需实际采样确认。
 
 ### ATK 正式验证
 

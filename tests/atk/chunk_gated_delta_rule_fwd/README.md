@@ -150,7 +150,28 @@ done
 golden、反向或输出拷回检查。`--iterations` 控制区间内公开接口调用次数，默认 1；工具自身
 的 `--warm-up` 控制 kernel replay 的预热，与脚本的 `--warmup` 不同。
 
-必须保留命令中的 MSTX、通配 kernel 和 launch-count 参数，否则工具默认可能只采到
+脚本通过 `ctypes` 直接调用 CANN `libms_tools_ext.so` 的 `mstxRangeStartA/End`，不使用
+受 torch_npu profiler 启用状态约束的 `torch_npu.npu.mstx`。原实现遗漏了 range id 为 0
+的失败情况，可能打印调用完成但未建立采集区间。现在返回 0 会立即报错；正常启动会打印
+`[MSTX] native range started: id=...`。找不到动态库时先 source CANN 环境，也可用
+`--mstx-lib /absolute/path/libms_tools_ext.so` 指定。ABI 参考官方
+[原生 MSTX Python 调用](https://github.com/Ascend/mstx/blob/master/docs/en/api_reference/Common/mstxRangeStartA.md)。
+
+如果仍提示 `No profiling data matched`，该日志不能单独区分 MSTX 未生效、kernel 匹配失败
+和工具未生成 dump。先用无 MSTX 的最小采样检查前向中的 Prepare kernel：
+
+```bash
+msprof op \
+  --application="python tests/atk/chunk_gated_delta_rule_fwd/scripts/profile_msprof.py --case-id 0 --device 0 --warmup 0 --iterations 1 --no-mstx" \
+  --kernel-name=chunk_gated_delta_rule_fwd_prepare --launch-count=1 \
+  --aic-metrics=Default --output=./output/msprof/fwd_prepare_diagnostic
+```
+
+此命令不要加 `--mstx`、`--mstx-include`；它只排查 Prepare kernel 的采集，不代表完整前向
+时延。若仍为空，保存完整命令、msprof/CANN/torch_npu 版本、完整控制台日志及原始 dump 目录，
+再核对实际 kernel 名称和工具注入过程。只有出现非空 kernel 报告才算采集成功。
+
+正式区间采样保留命令中的 MSTX、通配 kernel 和 launch-count 参数，否则工具默认可能只采到
 首个 kernel。读取各 kernel 的 `OpBasicInfo.csv` 中 `Task Duration(us)`，同时核对 kernel
 名称及采集数量；不要把 AIC/AIV 时间相加，也不要用 Python 运行时间计算收益。
 `msprof op` 默认进行逐 kernel replay，用于定点分析，不能直接替代原调用链端到端性能验收；
@@ -158,6 +179,9 @@ golden、反向或输出拷回检查。`--iterations` 控制区间内公开接�
 
 参数与数据字段参考官方 [msOpProf 使用指南](https://github.com/Ascend/msopprof/blob/master/docs/en/user_guide/msopprof_user_guide.md)
 和 [性能数据说明](https://github.com/Ascend/msopprof/blob/master/docs/en/user_guide/msopprof_performance_data.md)。
+
+采集入口的 CPU 回归：`python tests/atk/common/test_msprof_runner.py`，覆盖原生 uint64 ABI、
+range id 为 0 时中止、预热边界及无 MSTX 排查模式；不代表目标设备采集已通过。
 
 不依赖 ATK/NPU 的脚本合同回归：
 
